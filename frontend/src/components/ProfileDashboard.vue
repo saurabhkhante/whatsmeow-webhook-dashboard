@@ -206,108 +206,80 @@ export default {
   props: ["email"],
   data() {
     return {
-      webhooks: [],
-      loading: true,
+      webhooks: [
+        {
+          id: "demo1",
+          method: "POST",
+          url: "https://example.com/webhook1",
+          filter_type: "all",
+          filter_value: "",
+          created_at: new Date().toISOString()
+        },
+        {
+          id: "demo2",
+          method: "POST",
+          url: "https://example.com/webhook2",
+          filter_type: "group",
+          filter_value: "123456789@g.us",
+          created_at: new Date().toISOString()
+        }
+      ],
+      loading: false,
       newMethod: "POST",
       error: "",
-      logs: {},
-      urlRefs: {},
-      logsInterval: null,
-      // WhatsApp connection state
-      waStatus: '',
+      logs: {
+        demo1: [
+          {
+            timestamp: new Date().toISOString(),
+            payload: JSON.stringify({
+              from: "1234567890@s.whatsapp.net",
+              type: "text",
+              text: "Hello, World!"
+            }, null, 2)
+          }
+        ]
+      },
+      waStatus: 'connected',
       waQR: '',
       waLoginState: '',
       waLoading: false,
-      showDebug: false,
       newURL: '',
       newFilterType: 'all',
       newFilterValue: '',
       showChatsModal: false,
       chatsLoading: false,
       chatsError: '',
-      recentChats: [],
+      recentChats: [
+        { id: "123456789@g.us", name: "Demo Group", type: "group" },
+        { id: "987654321@s.whatsapp.net", name: "Demo Contact", type: "chat" }
+      ],
       filteredChats: []
     };
   },
-  mounted() {
-    this.fetchWebhooks();
-    this.logsInterval = setInterval(this.fetchAllLogs, 5000);
-    this.fetchWAStatus();
-    this.waPollInterval = setInterval(this.fetchWAStatus, 2000);
-  },
-  beforeUnmount() {
-    clearInterval(this.logsInterval);
-    clearInterval(this.waPollInterval);
-  },
   methods: {
     async fetchWebhooks() {
-      this.loading = true;
-      this.error = "";
-      try {
-        const res = await fetch("/api/webhooks");
-        if (!res.ok) throw new Error("Failed to load webhooks");
-        this.webhooks = await res.json();
-        this.fetchAllLogs();
-      } catch (e) {
-        this.error = e.message;
-      } finally {
-        this.loading = false;
-      }
+      // Demo mode - do nothing
     },
     async createWebhook() {
-      this.error = "";
-      try {
-        const res = await fetch("/api/webhooks/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            method: this.newMethod,
-            url: this.newURL,
-            filter_type: this.newFilterType,
-            filter_value: this.newFilterValue
-          })
-        });
-        if (!res.ok) throw new Error("Failed to create webhook");
-        await this.fetchWebhooks();
-        this.newURL = '';
-        this.newFilterType = 'all';
-        this.newFilterValue = '';
-      } catch (e) {
-        this.error = e.message;
-      }
+      // Demo mode - add to local array
+      this.webhooks.unshift({
+        id: "demo" + (this.webhooks.length + 1),
+        method: this.newMethod,
+        url: this.newURL,
+        filter_type: this.newFilterType,
+        filter_value: this.newFilterValue,
+        created_at: new Date().toISOString()
+      });
+      this.newURL = '';
+      this.newFilterType = 'all';
+      this.newFilterValue = '';
     },
     async deleteWebhook(id) {
-      this.error = "";
-      try {
-        const res = await fetch("/api/webhooks/delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id })
-        });
-        if (!res.ok) throw new Error("Failed to delete webhook");
-        await this.fetchWebhooks();
-      } catch (e) {
-        this.error = e.message;
-      }
+      // Demo mode - remove from local array
+      this.webhooks = this.webhooks.filter(wh => wh.id !== id);
     },
     fullWebhookUrl(id) {
       return window.location.origin + "/webhook/" + id;
-    },
-    async fetchAllLogs() {
-      for (const wh of this.webhooks) {
-        try {
-          const res = await fetch(`/api/webhooks/logs?id=${wh.id}`);
-          if (res.ok) {
-            const logs = await res.json();
-            this.logs[wh.id] = logs.map(l => ({
-              timestamp: l.timestamp,
-              payload: JSON.stringify(l.payload, null, 2)
-            }));
-          }
-        } catch (e) {
-          // Ignore log fetch errors
-        }
-      }
     },
     formatTime(ts) {
       return new Date(ts).toLocaleString();
@@ -316,57 +288,10 @@ export default {
       const url = this.fullWebhookUrl(id);
       if (navigator.clipboard) {
         navigator.clipboard.writeText(url);
-      } else {
-        const el = document.createElement('textarea');
-        el.value = url;
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand('copy');
-        document.body.removeChild(el);
       }
-    },
-    async fetchWAStatus() {
-      try {
-        const res = await fetch('/api/wa/status');
-        if (res.ok) {
-          const data = await res.json();
-          this.waStatus = data.status || '';
-          this.waQR = data.qr || '';
-          this.waLoginState = data.loginState || '';
-        } else {
-          this.waStatus = 'error';
-          this.waLoginState = 'Failed to fetch status';
-        }
-      } catch (e) {
-        this.waStatus = 'error';
-        this.waLoginState = 'Network error';
-      }
-    },
-    async connectWA() {
-      this.waLoading = true;
-      try {
-        const response = await fetch('/api/wa/connect', { method: 'POST' });
-        if (!response.ok) {
-          throw new Error('Failed to connect');
-        }
-        await this.fetchWAStatus();
-      } catch (error) {
-        console.error('connectWA: Error occurred:', error);
-      }
-      this.waLoading = false;
-    },
-    async disconnectWA() {
-      this.waLoading = true;
-      await fetch('/api/wa/disconnect', { method: 'POST' });
-      this.waLoading = false;
-      this.fetchWAStatus();
     },
     waStatusMessage() {
-      if (this.waStatus === 'waiting_qr') return 'Scan this QR code with WhatsApp to connect.';
-      if (this.waStatus === 'connected') return 'WhatsApp Connected!';
-      if (this.waStatus === 'disconnected' || !this.waStatus) return 'Not connected.';
-      if (this.waStatus === 'error') return this.waLoginState || 'An error occurred.';
-      return this.waLoginState || this.waStatus;
+      return 'WhatsApp Connected!';
     },
     onFilterTypeChange() {
       this.newFilterValue = '';
@@ -376,25 +301,11 @@ export default {
       if (this.newFilterType === 'chat') return 'Enter chat ID';
       return '';
     },
-    async showRecentChats() {
+    showRecentChats() {
       this.showChatsModal = true;
-      this.chatsLoading = true;
-      this.chatsError = '';
-      try {
-        const res = await fetch('/api/wa/chats');
-        if (res.ok) {
-          this.recentChats = await res.json();
-          this.filteredChats = this.recentChats.filter(chat =>
-            this.newFilterType === 'group' ? chat.type === 'group' : true
-          );
-        } else {
-          this.chatsError = 'Failed to load recent chats';
-        }
-      } catch (e) {
-        this.chatsError = e.message;
-      } finally {
-        this.chatsLoading = false;
-      }
+      this.filteredChats = this.recentChats.filter(chat =>
+        this.newFilterType === 'group' ? chat.type === 'group' : true
+      );
     },
     closeChatsModal() {
       this.showChatsModal = false;

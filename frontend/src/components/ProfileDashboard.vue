@@ -110,7 +110,7 @@
 
         <div v-if="loading" class="text-sm text-gray-500">Loading webhooks...</div>
         <div v-else-if="webhooks.length === 0" class="text-sm text-gray-500">No webhooks yet.</div>
-        <div v-else class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        <div v-else class="space-y-6">
           <div v-for="wh in webhooks" :key="wh.id"
             class="relative rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
             <div class="space-y-3">

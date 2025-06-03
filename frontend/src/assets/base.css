@@ -1,14 +1,19 @@
-/* Base styles */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Remove fixed width constraints */
-body {
+/* Reset default styles */
+* {
   margin: 0;
   padding: 0;
+  box-sizing: border-box;
+}
+
+/* Ensure full width and height */
+html, body {
   width: 100%;
   min-height: 100vh;
+  overflow-x: hidden;
 }
 
 #app {

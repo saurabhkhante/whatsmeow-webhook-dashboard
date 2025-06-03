@@ -1,8 +1,8 @@
 <template>
-  <div class="min-h-screen bg-gray-50">
+  <div class="min-h-screen w-full">
     <!-- Top Navigation Bar -->
     <nav class="bg-white shadow">
-      <div class="px-4 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-full px-4 sm:px-6 lg:px-8">
         <div class="flex h-16 justify-between">
           <div class="flex items-center">
             <div class="flex-shrink-0">
@@ -20,7 +20,7 @@
       </div>
     </nav>
 
-    <main class="px-4 sm:px-6 lg:px-8 py-6">
+    <main class="mx-auto max-w-full px-4 sm:px-6 lg:px-8 py-6">
       <!-- WhatsApp Connection Status -->
       <div class="mb-6 rounded-lg bg-white p-6 shadow">
         <div class="text-center">
@@ -119,7 +119,7 @@
               <div class="text-sm text-gray-500">
                 URL:
                 <div class="mt-1 flex items-center gap-2">
-                  <code class="block rounded bg-gray-50 p-2 text-xs font-mono">{{ wh.url || fullWebhookUrl(wh.id)
+                  <code class="block rounded bg-gray-50 p-2 text-xs font-mono break-all">{{ wh.url || fullWebhookUrl(wh.id)
                   }}</code>
                   <button @click="copyUrl(wh.id)"
                     class="rounded-md bg-white px-2 py-1 text-xs font-semibold text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
@@ -138,7 +138,7 @@
                 <div v-if="logs[wh.id] && logs[wh.id].length > 0">
                   <div v-for="log in logs[wh.id]" :key="log.timestamp" class="rounded-md bg-gray-50 p-3">
                     <div class="text-xs text-primary-600">{{ formatTime(log.timestamp) }}</div>
-                    <pre class="mt-1 overflow-x-auto text-xs text-gray-600">{{ log.payload }}</pre>
+                    <pre class="mt-1 overflow-x-auto text-xs text-gray-600 break-all">{{ log.payload }}</pre>
                   </div>
                 </div>
                 <div v-else class="text-xs text-gray-400">No messages yet.</div>

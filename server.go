@@ -30,32 +30,6 @@ var (
 	db *sql.DB
 )
 
-const (
-	sessionCookieName = "session_id"
-)
-
-type Webhook struct {
-	ID          string    `json:"id"`
-	URL         string    `json:"url"`
-	Method      string    `json:"method"`       // "GET" or "POST"
-	FilterType  string    `json:"filter_type"`  // "all", "group", "chat"
-	FilterValue string    `json:"filter_value"` // Group/Chat ID (empty for "all")
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-type UserWebhooks struct {
-	Webhooks []Webhook `json:"webhooks"`
-}
-
-// For recent chats endpoint
-type Chat struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"` // "group" or "chat"
-}
-
-var webhookMu sync.Mutex
-
 // --- Webhook log storage (in-memory, per webhook) ---
 type WebhookLogEntry struct {
 	Timestamp time.Time              `json:"timestamp"`
@@ -95,7 +69,29 @@ var waUsers = struct {
 	data: make(map[string]*UserWAState),
 }
 
-func isAuthenticated(r *http.Request) bool {
+type Webhook struct {
+	ID          string    `json:"id"`
+	URL         string    `json:"url"`
+	Method      string    `json:"method"`       // "GET" or "POST"
+	FilterType  string    `json:"filter_type"`  // "all", "group", "chat"
+	FilterValue string    `json:"filter_value"` // Group/Chat ID (empty for "all")
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type UserWebhooks struct {
+	Webhooks []Webhook `json:"webhooks"`
+}
+
+// For recent chats endpoint
+type Chat struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"` // "group" or "chat"
+}
+
+var webhookMu sync.Mutex
+
+func isAuthenticated(r *http.Request, sessionCookieName string) bool {
 	cookie, err := r.Cookie(sessionCookieName)
 	return err == nil && cookie.Value != ""
 }
@@ -140,7 +136,7 @@ func generateWebhookID() string {
 }
 
 // Helper: get the logged-in user's email from the session cookie
-func getUserEmail(r *http.Request) string {
+func getUserEmail(r *http.Request, sessionCookieName string) string {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
 		return ""
@@ -161,14 +157,14 @@ func getUserWAState(email string) *UserWAState {
 }
 
 // Send the webhook HTTP request (POST or GET)
-func sendWebhook(wh Webhook, payload map[string]interface{}) error {
+func sendWebhook(wh Webhook, payload map[string]interface{}, webhookURL string, method string) error {
 	var req *http.Request
 	var err error
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	if wh.Method == "GET" {
+	if method == "GET" {
 		// For GET, encode payload as query params
-		urlWithParams := wh.URL
+		urlWithParams := webhookURL
 		if len(payload) > 0 {
 			q := url.Values{}
 			for k, v := range payload {
@@ -184,7 +180,7 @@ func sendWebhook(wh Webhook, payload map[string]interface{}) error {
 	} else {
 		// For POST, send JSON body
 		data, _ := json.Marshal(payload)
-		req, err = http.NewRequest("POST", wh.URL, bytes.NewBuffer(data))
+		req, err = http.NewRequest("POST", webhookURL, bytes.NewBuffer(data))
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if err != nil {
@@ -201,7 +197,7 @@ func sendWebhook(wh Webhook, payload map[string]interface{}) error {
 }
 
 // Helper: Forward WhatsApp message to all user webhooks
-func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath string) {
+func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath string, mediaDir string) {
 	fmt.Printf("DEBUG: [FORWARD] user email: %s\n", email)
 	userID, err := getUserIDByEmail(email)
 	if err != nil {
@@ -262,7 +258,7 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 		if shouldForward {
 			fmt.Printf("DEBUG: Forwarding to webhook %s (%s) at URL: %s\n", wh.ID, wh.Method, wh.URL)
 			addWebhookLog(wh.ID, payload)
-			err := sendWebhook(wh, payload)
+			err := sendWebhook(wh, payload, wh.URL, wh.Method)
 			if err != nil {
 				fmt.Printf("ERROR: Failed to send webhook: %v\n", err)
 			}
@@ -355,9 +351,9 @@ func getRecentChats(email string) []Chat {
 	return result
 }
 
-func initDB() error {
+func initDB(dbPath string) error {
 	var err error
-	db, err = sql.Open("sqlite", "file:whatsmeow.db?mode=rwc&_pragma=foreign_keys(1)")
+	db, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -393,12 +389,13 @@ func checkPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
-func startServer() {
-	if err := initDB(); err != nil {
+// Refactor startServer to accept a *http.ServeMux argument and register all handlers on it
+func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, waSessionPrefix string) {
+	if err := initDB(dbPath); err != nil {
 		panic("Failed to initialize DB: " + err.Error())
 	}
-	// --- API: Register ---
-	http.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
+	// Register all handlers on mux instead of http.DefaultServeMux
+	mux.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -429,7 +426,7 @@ func startServer() {
 		w.Write([]byte(`{"success":true}`))
 	})
 	// --- API: Login (updated for DB users) ---
-	http.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -469,7 +466,7 @@ func startServer() {
 	})
 
 	// --- API: Logout ---
-	http.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -486,9 +483,9 @@ func startServer() {
 	})
 
 	// --- API: Session Status ---
-	http.HandleFunc("/api/session", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/session", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if isAuthenticated(r) {
+		if isAuthenticated(r, sessionCookieName) {
 			w.Write([]byte(`{"authenticated":true}`))
 		} else {
 			w.Write([]byte(`{"authenticated":false}`))
@@ -496,12 +493,12 @@ func startServer() {
 	})
 
 	// --- API: QR PNG (existing) ---
-	http.HandleFunc("/qr.png", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/qr.png", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		code := getUserQRCode(email)
 		if code == "" {
 			http.NotFound(w, r)
@@ -517,13 +514,13 @@ func startServer() {
 	})
 
 	// --- API: WhatsApp Status ---
-	http.HandleFunc("/api/wa/status", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/wa/status", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte(`{"authenticated":false}`))
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 
 		status := getUserWAStatus(email)
 		qr := getUserQRCode(email)
@@ -539,43 +536,43 @@ func startServer() {
 	})
 
 	// --- API: WhatsMeow Connect ---
-	http.HandleFunc("/api/wa/connect", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/wa/connect", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		if getUserWAStatus(email) == "connected" {
 			w.Write([]byte(`{"success":true,"message":"Already connected"}`))
 			return
 		}
 
 		// Start connection in background
-		go startUserWhatsMeowConnection(email)
+		go startUserWhatsMeowConnection(email, mediaDir, waSessionPrefix)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"success":true,"message":"Connecting..."}`))
 	})
 
 	// --- API: WhatsMeow Disconnect ---
-	http.HandleFunc("/api/wa/disconnect", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/wa/disconnect", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		email := getUserEmail(r)
-		disconnectUserWhatsMeow(email)
+		email := getUserEmail(r, sessionCookieName)
+		disconnectUserWhatsMeow(email, mediaDir, waSessionPrefix)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"disconnected"}`))
 	})
 
 	// --- API: List Webhooks ---
-	http.HandleFunc("/api/webhooks", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/webhooks", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		userID, err := getUserIDByEmail(email)
 		if err != nil {
 			fmt.Println("ERROR: Could not get user ID for email", email, err)
@@ -596,9 +593,9 @@ func startServer() {
 	})
 
 	// --- API: Create Webhook ---
-	http.HandleFunc("/api/webhooks/create", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/webhooks/create", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("DEBUG: /api/webhooks/create called")
-		if !isAuthenticated(r) {
+		if !isAuthenticated(r, sessionCookieName) {
 			fmt.Println("DEBUG: Not authenticated for webhook creation")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -612,6 +609,11 @@ func startServer() {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			fmt.Println("DEBUG: Failed to decode request:", err)
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+		// Validate required fields
+		if req.URL == "" {
+			http.Error(w, "Missing URL", http.StatusBadRequest)
 			return
 		}
 		// Validate method
@@ -630,7 +632,7 @@ func startServer() {
 		if req.FilterType == "" {
 			req.FilterType = "all"
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		userID, err := getUserIDByEmail(email)
 		if err != nil {
 			fmt.Println("ERROR: Could not get user ID for email", email, err)
@@ -667,8 +669,8 @@ func startServer() {
 	})
 
 	// --- API: Delete Webhook ---
-	http.HandleFunc("/api/webhooks/delete", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/webhooks/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -679,7 +681,7 @@ func startServer() {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		userID, err := getUserIDByEmail(email)
 		if err != nil {
 			fmt.Println("ERROR: Could not get user ID for email", email, err)
@@ -697,8 +699,8 @@ func startServer() {
 	})
 
 	// --- API: Webhook Logs ---
-	http.HandleFunc("/api/webhooks/logs", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r) {
+	mux.HandleFunc("/api/webhooks/logs", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -713,14 +715,14 @@ func startServer() {
 	})
 
 	// --- API: Recent Chats ---
-	http.HandleFunc("/api/wa/chats", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/wa/chats", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("DEBUG: /api/wa/chats called")
-		if !isAuthenticated(r) {
+		if !isAuthenticated(r, sessionCookieName) {
 			fmt.Println("DEBUG: Not authenticated for chats endpoint")
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		email := getUserEmail(r)
+		email := getUserEmail(r, sessionCookieName)
 		fmt.Println("DEBUG: Getting recent chats for:", email)
 
 		// Get recent chats for this user
@@ -744,9 +746,9 @@ func startServer() {
 	})
 
 	// --- Serve media files ---
-	http.HandleFunc("/media/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/media/", func(w http.ResponseWriter, r *http.Request) {
 		mediaFile := path.Base(r.URL.Path)
-		filePath := path.Join("media", mediaFile)
+		filePath := path.Join(mediaDir, mediaFile)
 		f, err := os.Open(filePath)
 		if err != nil {
 			http.NotFound(w, r)
@@ -770,7 +772,7 @@ func startServer() {
 	})
 
 	// --- Webhook receiver endpoint (stub) ---
-	http.HandleFunc("/webhook/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/webhook/", func(w http.ResponseWriter, r *http.Request) {
 		id := path.Base(r.URL.Path)
 		if id == "" {
 			http.NotFound(w, r)
@@ -787,7 +789,7 @@ func startServer() {
 	fs := http.FileServer(http.Dir(staticDir))
 
 	// Catch-all handler for frontend (except /api/ and /qr.png)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// If the request is for an API or QR endpoint, skip
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/qr.png" {
 			http.NotFound(w, r)
@@ -802,12 +804,6 @@ func startServer() {
 		// Fallback: serve index.html for SPA routing
 		http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
 	})
-
-	fmt.Println("Starting web server at http://localhost:8080")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		fmt.Println("Failed to start server:", err)
-	}
 }
 
 // Update QR code for a specific user
@@ -859,7 +855,7 @@ func getUserWAStatus(email string) string {
 }
 
 // Handle WhatsApp events for a specific user
-func handleUserWAEvent(email string, evt interface{}) {
+func handleUserWAEvent(email string, evt interface{}, mediaDir string, waSessionPrefix string) {
 	state := getUserWAState(email)
 	switch v := evt.(type) {
 	case *events.Message:
@@ -936,12 +932,12 @@ func handleUserWAEvent(email string, evt interface{}) {
 			}
 		}
 		// Forward to user's webhooks
-		forwardToWebhooks(email, payload, mediaPath)
+		forwardToWebhooks(email, payload, mediaPath, mediaDir)
 	}
 }
 
 // Start WhatsApp connection for a specific user
-func startUserWhatsMeowConnection(email string) {
+func startUserWhatsMeowConnection(email string, mediaDir string, waSessionPrefix string) {
 	fmt.Println("DEBUG: startUserWhatsMeowConnection called for:", email)
 	state := getUserWAState(email)
 
@@ -963,7 +959,7 @@ func startUserWhatsMeowConnection(email string) {
 	state.mu.Unlock()
 
 	// Use user-specific session file
-	sessionFile := fmt.Sprintf("whatsmeow_%s.db", email)
+	sessionFile := fmt.Sprintf("%s%s.db", waSessionPrefix, email)
 	fmt.Println("DEBUG: Using session file:", sessionFile)
 	container, err := sqlstore.New(ctx, "sqlite", fmt.Sprintf("file:%s?mode=rwc&_pragma=foreign_keys(1)", sessionFile), nil)
 	if err != nil {
@@ -991,7 +987,7 @@ func startUserWhatsMeowConnection(email string) {
 
 	// Add event handler for this user
 	client.AddEventHandler(func(evt interface{}) {
-		handleUserWAEvent(email, evt)
+		handleUserWAEvent(email, evt, mediaDir, waSessionPrefix)
 	})
 
 	if client.Store.ID == nil {
@@ -1073,7 +1069,7 @@ func startUserWhatsMeowConnection(email string) {
 }
 
 // Disconnect WhatsApp for a specific user
-func disconnectUserWhatsMeow(email string) {
+func disconnectUserWhatsMeow(email string, mediaDir string, waSessionPrefix string) {
 	state := getUserWAState(email)
 	state.mu.Lock()
 
@@ -1090,7 +1086,7 @@ func disconnectUserWhatsMeow(email string) {
 	state.mu.Unlock()
 
 	// Remove user's session file
-	sessionFile := fmt.Sprintf("whatsmeow_%s.db", email)
+	sessionFile := fmt.Sprintf("%s%s.db", waSessionPrefix, email)
 	os.Remove(sessionFile)
 
 	setUserWAStatus(email, "disconnected")

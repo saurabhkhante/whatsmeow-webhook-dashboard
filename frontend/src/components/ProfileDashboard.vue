@@ -2,7 +2,7 @@
   <div class="min-h-screen bg-gray-50">
     <!-- Top Navigation Bar -->
     <nav class="bg-white shadow">
-      <div class="w-full px-4 sm:px-6 lg:px-8">
+      <div class="px-4 sm:px-6 lg:px-8">
         <div class="flex h-16 justify-between">
           <div class="flex items-center">
             <div class="flex-shrink-0">
@@ -20,7 +20,7 @@
       </div>
     </nav>
 
-    <main class="w-full px-4 sm:px-6 lg:px-8 py-6">
+    <main class="px-4 sm:px-6 lg:px-8 py-6">
       <!-- WhatsApp Connection Status -->
       <div class="mb-6 rounded-lg bg-white p-6 shadow">
         <div class="text-center">

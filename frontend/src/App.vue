@@ -111,6 +111,7 @@ function startWAPoll() {
   stopWAPoll()
   waPollInterval = setInterval(fetchWAStatus, 2000)
 }
+
 function stopWAPoll() {
   if (waPollInterval) clearInterval(waPollInterval)
   waPollInterval = null
@@ -142,156 +143,80 @@ watch(authenticated, (val) => {
 onMounted(() => {
   checkSession()
 })
-
-function statusMessage() {
-  if (waStatus.value === 'waiting_qr') return 'Scan this QR code with WhatsApp to connect.'
-  if (waStatus.value === 'connected') return 'WhatsApp Connected!'
-  if (waStatus.value === 'disconnected' || !waStatus.value) return 'Not connected.'
-  if (waStatus.value === 'error') return waLoginState.value || 'An error occurred.'
-  return waLoginState.value || waStatus.value
-}
 </script>
 
 <template>
-  <div v-if="!authenticated" class="login-container">
-    <h2 v-if="!showRegister">Login</h2>
-    <h2 v-else>Register</h2>
-    <form v-if="!showRegister" @submit.prevent="login">
-      <input v-model="email" type="email" placeholder="Email" required />
-      <input v-model="password" type="password" placeholder="Password" required />
-      <button type="submit" :disabled="loading">Login</button>
-      <div v-if="error" class="error">{{ error }}</div>
-      <div class="hint">Don't have an account? <a href="#" @click.prevent="showRegister = true; error = ''">Register</a></div>
-    </form>
-    <form v-else @submit.prevent="register">
-      <input v-model="email" type="email" placeholder="Email" required />
-      <input v-model="password" type="password" placeholder="Password" required />
-      <button type="submit" :disabled="loading">Register</button>
-      <div v-if="error" class="error">{{ error }}</div>
-      <div v-if="regSuccess" class="success">Registration successful! Please log in.</div>
-      <div class="hint">Already have an account? <a href="#" @click.prevent="showRegister = false; error = ''">Login</a></div>
-    </form>
-  </div>
-  <ProfileDashboard v-else :email="userEmail" @logout="logout" />
-</template>
+  <div class="min-h-screen bg-gray-50">
+    <div v-if="!authenticated" class="flex min-h-screen flex-1 flex-col justify-center px-6 py-12 lg:px-8">
+      <div class="sm:mx-auto sm:w-full sm:max-w-sm">
+        <h2 class="mt-10 text-center text-2xl font-bold leading-9 tracking-tight text-gray-900">
+          {{ !showRegister ? 'Sign in to your account' : 'Create a new account' }}
+        </h2>
+      </div>
 
-<style scoped>
-body {
-  background: #222;
-}
-.login-container {
-  max-width: 350px;
-  margin: 80px auto;
-  padding: 2rem;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 16px rgba(0,0,0,0.10);
-  text-align: center;
-}
-.login-container input {
-  display: block;
-  width: 100%;
-  margin: 1rem 0;
-  padding: 0.5rem;
-  font-size: 1rem;
-}
-.login-container button {
-  width: 100%;
-  padding: 0.5rem;
-  font-size: 1rem;
-  background: #42b983;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.login-container .error {
-  color: #c00;
-  margin-top: 1rem;
-}
-.login-container .success {
-  color: #43a047;
-  margin-top: 1rem;
-}
-.hint {
-  margin-top: 1rem;
-  color: #888;
-  font-size: 0.95em;
-}
-.app-container {
-  max-width: 400px;
-  margin: 60px auto;
-  padding: 2rem 2.5rem 2.5rem 2.5rem;
-  background: #fff;
-  border-radius: 16px;
-  box-shadow: 0 2px 16px rgba(0,0,0,0.10);
-}
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2rem;
-}
-header button {
-  background: #eee;
-  color: #333;
-  border: none;
-  border-radius: 4px;
-  padding: 0.5rem 1rem;
-  cursor: pointer;
-}
-.wa-section {
-  text-align: center;
-}
-.qr-area {
-  margin: 2rem auto 1rem auto;
-  padding: 1.5rem 1.5rem 1rem 1.5rem;
-  background: #f8f8f8;
-  border-radius: 12px;
-  display: inline-block;
-}
-.qr-img {
-  display: block;
-  margin: 0 auto 1rem auto;
-  background: #fff;
-  padding: 16px;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-  width: 220px;
-  height: 220px;
-}
-.wa-status {
-  margin-top: 1rem;
-  font-size: 1.1em;
-  color: #333;
-}
-.wa-status.success {
-  color: #42b983;
-  font-weight: bold;
-  font-size: 1.2em;
-}
-.debug-toggle {
-  margin-top: 2rem;
-}
-.debug-toggle button {
-  background: #f3f3f3;
-  color: #444;
-  border: none;
-  border-radius: 4px;
-  padding: 0.4rem 1rem;
-  cursor: pointer;
-  font-size: 0.95em;
-}
-.debug {
-  background: #f3f3f3;
-  color: #444;
-  font-size: 0.95em;
-  padding: 0.5em 1em;
-  border-radius: 6px;
-  margin-top: 1em;
-  text-align: left;
-  display: inline-block;
-  word-break: break-all;
-  max-width: 350px;
-}
-</style>
+      <div class="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
+        <form v-if="!showRegister" @submit.prevent="login" class="space-y-6">
+          <div>
+            <label for="email" class="block text-sm font-medium leading-6 text-gray-900">Email address</label>
+            <div class="mt-2">
+              <input v-model="email" id="email" name="email" type="email" autocomplete="email" required
+                class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-primary-600 sm:text-sm sm:leading-6 px-3" />
+            </div>
+          </div>
+
+          <div>
+            <label for="password" class="block text-sm font-medium leading-6 text-gray-900">Password</label>
+            <div class="mt-2">
+              <input v-model="password" id="password" name="password" type="password" autocomplete="current-password" required
+                class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-primary-600 sm:text-sm sm:leading-6 px-3" />
+            </div>
+          </div>
+
+          <div>
+            <button type="submit" :disabled="loading"
+              class="flex w-full justify-center rounded-md bg-primary-600 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-primary-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-600 disabled:opacity-50 disabled:cursor-not-allowed">
+              {{ loading ? 'Signing in...' : 'Sign in' }}
+            </button>
+          </div>
+        </form>
+
+        <form v-else @submit.prevent="register" class="space-y-6">
+          <div>
+            <label for="reg-email" class="block text-sm font-medium leading-6 text-gray-900">Email address</label>
+            <div class="mt-2">
+              <input v-model="email" id="reg-email" name="email" type="email" autocomplete="email" required
+                class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-primary-600 sm:text-sm sm:leading-6 px-3" />
+            </div>
+          </div>
+
+          <div>
+            <label for="reg-password" class="block text-sm font-medium leading-6 text-gray-900">Password</label>
+            <div class="mt-2">
+              <input v-model="password" id="reg-password" name="password" type="password" autocomplete="new-password" required
+                class="block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-primary-600 sm:text-sm sm:leading-6 px-3" />
+            </div>
+          </div>
+
+          <div>
+            <button type="submit" :disabled="loading"
+              class="flex w-full justify-center rounded-md bg-primary-600 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-primary-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-600 disabled:opacity-50 disabled:cursor-not-allowed">
+              {{ loading ? 'Creating account...' : 'Create account' }}
+            </button>
+          </div>
+        </form>
+
+        <div v-if="error" class="mt-4 text-center text-sm text-red-600">{{ error }}</div>
+        <div v-if="regSuccess" class="mt-4 text-center text-sm text-primary-600">Registration successful! Please log in.</div>
+
+        <p class="mt-10 text-center text-sm text-gray-500">
+          {{ !showRegister ? 'Not a member?' : 'Already have an account?' }}
+          <a href="#" @click.prevent="showRegister = !showRegister; error = ''"
+            class="font-semibold leading-6 text-primary-600 hover:text-primary-500">
+            {{ !showRegister ? 'Create an account' : 'Sign in' }}
+          </a>
+        </p>
+      </div>
+    </div>
+    <ProfileDashboard v-else :email="userEmail" @logout="logout" />
+  </div>
+</template>

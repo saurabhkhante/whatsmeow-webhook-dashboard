@@ -2,7 +2,7 @@
   <div class="min-h-screen bg-gray-50">
     <!-- Top Navigation Bar -->
     <nav class="bg-white shadow">
-      <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="w-full px-4 sm:px-6 lg:px-8">
         <div class="flex h-16 justify-between">
           <div class="flex items-center">
             <div class="flex-shrink-0">
@@ -20,9 +20,9 @@
       </div>
     </nav>
 
-    <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-10">
+    <main class="w-full px-4 sm:px-6 lg:px-8 py-6">
       <!-- WhatsApp Connection Status -->
-      <div class="mb-8 rounded-lg bg-white p-6 shadow">
+      <div class="mb-6 rounded-lg bg-white p-6 shadow">
         <div class="text-center">
           <div v-if="waStatus === 'waiting_qr'">
             <div class="mx-auto max-w-sm rounded-lg bg-gray-50 p-6">

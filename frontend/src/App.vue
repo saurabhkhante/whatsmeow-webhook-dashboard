@@ -12,7 +12,7 @@ function logout() {
 </script>
 
 <template>
-  <div class="w-full min-h-screen">
+  <div class="min-h-screen w-full bg-gray-50">
     <ProfileDashboard v-if="authenticated" :email="userEmail" @logout="logout" />
   </div>
 </template>

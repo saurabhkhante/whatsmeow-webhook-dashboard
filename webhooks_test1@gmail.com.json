@@ -1,0 +1,12 @@
+{
+  "webhooks": [
+    {
+      "id": "mBF7E2Uwp92MSRg0",
+      "url": "https://japanese-rum.app.n8n.cloud/webhook/540c223a-ee98-4223-866e-3dd2baf4b19c",
+      "method": "GET",
+      "filter_type": "all",
+      "filter_value": "",
+      "created_at": "2025-05-30T17:12:07.337366+05:30"
+    }
+  ]
+}

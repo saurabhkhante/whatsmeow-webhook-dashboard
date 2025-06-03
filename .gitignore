@@ -1,0 +1,28 @@
+# Environment variables
+.env
+
+# Database files
+*.db
+whatsmeow_*.db
+
+# Media files
+media/
+
+# Session files
+*.session
+*.session-journal
+
+# Build files
+frontend/dist/
+frontend/node_modules/
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db 

@@ -1,0 +1,49 @@
+# .cursorrules for WhatsMeow Webhook Dashboard
+
+## General
+- All code must be clear, well-commented, and follow idiomatic Go and Vue.js best practices.
+- Use English for all code, comments, and documentation.
+- Keep frontend and backend code in their respective directories (`frontend/` for Vue, root for Go backend).
+- All new features should be added to the roadmap in `instructions.md`.
+
+## Go Backend
+- Use idiomatic Go formatting (`gofmt` or `go fmt`).
+- Use context for all long-running/background operations.
+- Store secrets (API keys, DB credentials) in environment variables, not in code.
+- Use proper error handling; never ignore errors.
+- All HTTP handlers must validate input and return appropriate status codes.
+- Use mutexes for all shared in-memory state.
+- Prefer database storage over in-memory for persistent/multi-user data.
+- All external HTTP requests (webhook forwarding) must have timeouts and error handling.
+- Do not log sensitive user data.
+
+## Vue Frontend
+- Use single-file components (`.vue`) and keep components small and focused.
+- Use scoped CSS for all components.
+- Use composition API or script setup for new components.
+- All user input must be validated before sending to the backend.
+- Use environment variables for API base URLs if deploying to different environments.
+- All network requests must handle errors and show user-friendly messages.
+- UI must be responsive and accessible (ARIA, keyboard navigation where possible).
+
+## Security
+- Never expose WhatsApp credentials, session files, or secrets in the frontend or public repos.
+- All API endpoints must check authentication and authorization.
+- Sanitize all user input (especially for webhook URLs and filters).
+- Use HTTPS in production.
+- Rate limit sensitive endpoints (login, webhook creation, etc.).
+
+## Code Review & Collaboration
+- All changes must be reviewed before merging to main/master.
+- Use clear, descriptive commit messages.
+- Reference issues or roadmap items in PRs.
+- Add/maintain tests for critical backend logic (where feasible).
+- Update `instructions.md` and `.cursorrules` as the project evolves.
+
+## Deployment
+- All deployment scripts (Docker, cloud, etc.) must be kept up to date.
+- Document all environment variables and setup steps in `instructions.md`.
+
+## Misc
+- Media files should not be committed to the repo; use `.gitignore` for `media/` and similar.
+- Keep dependencies up to date and audit for vulnerabilities regularly. 

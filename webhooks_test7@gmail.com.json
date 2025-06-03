@@ -1,0 +1,20 @@
+{
+  "webhooks": [
+    {
+      "id": "UOkB4d0xGWm3Fhof",
+      "url": "",
+      "method": "POST",
+      "filter_type": "",
+      "filter_value": "",
+      "created_at": "2025-05-29T15:22:46.934527+05:30"
+    },
+    {
+      "id": "Dmffrr4G9CPfhfvk",
+      "url": "http://localhost:8080/webhook",
+      "method": "POST",
+      "filter_type": "chat",
+      "filter_value": "918879901887@s.whatsapp.net",
+      "created_at": "2025-05-29T15:58:29.369275+05:30"
+    }
+  ]
+}

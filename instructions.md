@@ -51,6 +51,32 @@ This app lets you connect a WhatsApp account (via WhatsMeow), create webhooks, a
      - Password: `password123`
    - Connect WhatsApp, create webhooks, and send WhatsApp messages to test.
 
+### Docker Usage (Local & Production)
+
+1. **Build the Docker image:**
+   ```sh
+   docker build -t whatsmeow-dashboard .
+   ```
+
+2. **Run the app with environment variables and media volume:**
+   ```sh
+   docker run --env-file .env.production -v $(pwd)/media:/app/media -p 8080:8080 whatsmeow-dashboard
+   ```
+
+   - Use `.env.production` for production settings (never commit this file to git).
+   - The `media/` directory will persist WhatsApp media files.
+
+3. **Access the app:**
+   - Go to [http://localhost:8080](http://localhost:8080) (or your server's IP in production).
+
+#### **Environment Variables**
+- All configuration is managed via environment variables.
+- See `.env.example` for a template.
+
+#### **Production Deployment**
+- Copy your code and `.env.production` to your server.
+- Use Docker as above, mounting a persistent volume for `/app/media`.
+
 ### How It Works
 - WhatsApp messages are received by the backend and forwarded to all your webhooks.
 - Media is saved locally and accessible via a URL in the webhook payload.
@@ -113,8 +139,28 @@ This app lets you connect a WhatsApp account (via WhatsMeow), create webhooks, a
 - Frontend: Vue.js + Vite
 - Backend: Go
 
+## Testing
+
+- The backend includes a comprehensive test suite using Go's `testing` and `httptest` packages.
+- To run all tests:
+  ```sh
+  go test ./...
+  ```
+- Tests cover:
+  - User authentication and session management
+  - Webhook creation, listing, and deletion
+  - Media file saving and serving
+  - Webhook forwarding (with mock server)
+  - Security and edge cases (invalid input, unauthorized access, etc.)
+- All critical logic is covered to ensure reliability and security.
+
 ## Recent Changes
 
+- **Dockerization:** Added a multi-stage Dockerfile and .dockerignore for easy, reproducible deployment. Supports both local and production use with environment variables.
+- **Environment Variable Management:** Added support for `.env` and `.env.production` files. All secrets and config are now managed via environment variables.
+- **Media Volume Handling:** Media files are now stored in a configurable directory (`MEDIA_DIR`), and Docker volumes are recommended for persistence in production.
+- **Comprehensive Test Suite:** Added Go tests using the `testing` and `httptest` packages. Tests cover authentication, webhook management, media serving, webhook forwarding, and security edge cases.
+- **Security & Validation:** Improved input validation, error handling, and security best practices throughout the backend.
 - **Webhook Management System**: Implemented a system to create, list, and delete webhooks from a modern web UI. Each webhook has a unique URL and can be set to POST or GET.
 - **WhatsMeow Integration**: Integrated WhatsMeow for real-time message handling, allowing users to connect their WhatsApp account and receive messages.
 - **Webhook Forwarding Update**: The `forwardToWebhooks` function has been updated to load webhooks from the database instead of the JSON file. This ensures that messages are forwarded to the correct webhooks for each user. 

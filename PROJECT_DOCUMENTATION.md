@@ -344,6 +344,39 @@ export PORT=8080
 export DB_PATH=./users.db
 ```
 
+## Dockerization & Deployment
+
+### Docker Build & Run
+
+- **Build the Docker image:**
+  ```sh
+  docker build -t whatsmeow-dashboard .
+  ```
+- **Run the app with environment variables and media volume:**
+  ```sh
+  docker run --env-file .env.production -v $(pwd)/media:/app/media -p 8080:8080 whatsmeow-dashboard
+  ```
+  - Use `.env.production` for production settings (never commit this file to git).
+  - The `media/` directory will persist WhatsApp media files.
+- **Access the app:**
+  - Go to [http://localhost:8080](http://localhost:8080) (or your server's IP in production).
+
+### Environment Variables
+- All configuration is managed via environment variables.
+- See `.env.example` for a template.
+- For production, use a separate `.env.production` file and pass it to Docker with `--env-file`.
+
+### Media Volume Handling
+- Media files are stored in the directory specified by `MEDIA_DIR` (default `/app/media` in Docker).
+- Use a Docker volume or bind mount to persist media files across container restarts.
+
+### Production Deployment
+- Build and run the Docker image as above.
+- Mount a persistent volume for `/app/media`.
+- Copy your code and `.env.production` to your server.
+- No need for a reverse proxy for static files; Go backend serves frontend and media.
+- For SSL/TLS, use a reverse proxy (nginx, Caddy, etc.) or DigitalOcean's HTTPS features.
+
 ## Development Workflow
 
 ### Adding New Features
@@ -644,6 +677,29 @@ npm run dev
 - **Architecture**: Multi-user, session-based, RESTful API
 - **Storage**: SQLite + JSON + Binary session files
 - **Security**: bcrypt hashing, input validation, session management
+
+## Testing
+
+- The backend includes a comprehensive test suite using Go's `testing` and `httptest` packages.
+- To run all tests:
+  ```sh
+  go test ./...
+  ```
+- Tests cover:
+  - User authentication and session management
+  - Webhook creation, listing, and deletion
+  - Media file saving and serving
+  - Webhook forwarding (with mock server)
+  - Security and edge cases (invalid input, unauthorized access, etc.)
+- All critical logic is covered to ensure reliability and security.
+
+## Security & Validation Improvements
+- All user input is validated and sanitized.
+- Proper error handling throughout the backend.
+- Sensitive data is never logged or exposed in the frontend.
+- Session and media files are isolated per user.
+- All HTTP handlers check authentication and authorization.
+- Rate limiting and other security best practices are planned for future releases.
 
 ---
 

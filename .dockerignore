@@ -1,0 +1,41 @@
+# Go build
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node modules
+frontend/node_modules
+
+# Vite/Frontend build cache
+frontend/dist
+
+# DBs and media (if not needed in image)
+*.db
+*.db-journal
+media/
+
+# Editor/project files
+*.swp
+*.swo
+*.idea/
+.vscode/
+.cursor/
+
+# Git
+.git
+.gitignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test output
+*.log
+coverage/
+
+# Env files (optional, for prod use real env vars)
+.env 

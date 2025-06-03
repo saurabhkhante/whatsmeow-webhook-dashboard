@@ -11,6 +11,7 @@ media/
 # Session files
 *.session
 *.session-journal
+sessions/
 
 # Build files
 frontend/dist/
@@ -25,4 +26,7 @@ frontend/node_modules/
 
 # OS files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Webhook files
+webhooks_*.json 

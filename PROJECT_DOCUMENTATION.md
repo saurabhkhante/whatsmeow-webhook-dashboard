@@ -304,6 +304,7 @@ callOtherFunction()
 - Filename format: `{timestamp}_{message_id}.{extension}`
 - Organized in `/media/` directory
 - URL serving through `/media/*` endpoint
+- 24-hour retention policy (files automatically deleted after 24 hours)
 
 ## Environment Setup
 

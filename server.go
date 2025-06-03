@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -94,36 +93,6 @@ var webhookMu sync.Mutex
 func isAuthenticated(r *http.Request, sessionCookieName string) bool {
 	cookie, err := r.Cookie(sessionCookieName)
 	return err == nil && cookie.Value != ""
-}
-
-func getUserWebhookFile(email string) string {
-	return "webhooks_" + email + ".json"
-}
-
-func loadWebhooks(email string) ([]Webhook, error) {
-	file := getUserWebhookFile(email)
-	if _, err := os.Stat(file); os.IsNotExist(err) {
-		return []Webhook{}, nil
-	}
-	data, err := ioutil.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	var uw UserWebhooks
-	if err := json.Unmarshal(data, &uw); err != nil {
-		return nil, err
-	}
-	return uw.Webhooks, nil
-}
-
-func saveWebhooks(email string, webhooks []Webhook) error {
-	file := getUserWebhookFile(email)
-	uw := UserWebhooks{Webhooks: webhooks}
-	data, err := json.MarshalIndent(uw, "", "  ")
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(file, data, 0644)
 }
 
 func generateWebhookID() string {
@@ -228,6 +197,12 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 	}
 	fmt.Printf("DEBUG: Found %d webhooks for user %s\n", len(webhooks), email)
 
+	// Load BASE_URL from environment
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		fmt.Println("ERROR: BASE_URL environment variable is not set. Media URLs will be invalid for external services.")
+	}
+
 	for _, wh := range webhooks {
 		fmt.Printf("DEBUG: Checking webhook %s with filter_type=%s, filter_value=%s\n",
 			wh.ID, wh.FilterType, wh.FilterValue)
@@ -256,6 +231,12 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 		}
 
 		if shouldForward {
+			// If media_url is present, make it absolute
+			if murl, ok := payload["media_url"].(string); ok && murl != "" && baseURL != "" {
+				if !strings.HasPrefix(murl, "http://") && !strings.HasPrefix(murl, "https://") {
+					payload["media_url"] = strings.TrimRight(baseURL, "/") + murl
+				}
+			}
 			fmt.Printf("DEBUG: Forwarding to webhook %s (%s) at URL: %s\n", wh.ID, wh.Method, wh.URL)
 			addWebhookLog(wh.ID, payload)
 			err := sendWebhook(wh, payload, wh.URL, wh.Method)
@@ -389,11 +370,36 @@ func checkPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
+// Start media cleanup goroutine
+func startMediaCleanup(mediaDir string) {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			now := time.Now()
+			filepath.Walk(mediaDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() {
+					return nil
+				}
+				// Delete files older than 24 hours
+				if now.Sub(info.ModTime()) > 24*time.Hour {
+					os.Remove(path)
+					fmt.Printf("Deleted expired media file: %s\n", path)
+				}
+				return nil
+			})
+		}
+	}()
+}
+
 // Refactor startServer to accept a *http.ServeMux argument and register all handlers on it
 func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, waSessionPrefix string) {
 	if err := initDB(dbPath); err != nil {
 		panic("Failed to initialize DB: " + err.Error())
 	}
+
+	// Start media cleanup goroutine
+	startMediaCleanup(mediaDir)
+
 	// Register all handlers on mux instead of http.DefaultServeMux
 	mux.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -958,8 +964,10 @@ func startUserWhatsMeowConnection(email string, mediaDir string, waSessionPrefix
 	state.waCancel = cancel
 	state.mu.Unlock()
 
-	// Use user-specific session file
-	sessionFile := fmt.Sprintf("%s%s.db", waSessionPrefix, email)
+	// Ensure sessions directory exists
+	os.MkdirAll("sessions", 0755)
+	// Use user-specific session file in sessions dir
+	sessionFile := fmt.Sprintf("sessions/%s%s.db", waSessionPrefix, email)
 	fmt.Println("DEBUG: Using session file:", sessionFile)
 	container, err := sqlstore.New(ctx, "sqlite", fmt.Sprintf("file:%s?mode=rwc&_pragma=foreign_keys(1)", sessionFile), nil)
 	if err != nil {
@@ -1085,8 +1093,8 @@ func disconnectUserWhatsMeow(email string, mediaDir string, waSessionPrefix stri
 
 	state.mu.Unlock()
 
-	// Remove user's session file
-	sessionFile := fmt.Sprintf("%s%s.db", waSessionPrefix, email)
+	// Remove user's session file from sessions dir
+	sessionFile := fmt.Sprintf("sessions/%s%s.db", waSessionPrefix, email)
 	os.Remove(sessionFile)
 
 	setUserWAStatus(email, "disconnected")

@@ -28,5 +28,5 @@ func main() {
 	mux := http.NewServeMux()
 	startServer(mux, port, sessionCookieName, dbPath, mediaDir, waSessionPrefix)
 	fmt.Printf("Starting web server at http://localhost:%s\n", port)
-	http.ListenAndServe(":"+port, mux)
+	http.ListenAndServe(":"+port, withCORS(mux))
 }

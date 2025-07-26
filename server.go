@@ -19,7 +19,9 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
@@ -720,6 +722,62 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		json.NewEncoder(w).Encode(logs)
 	})
 
+	// --- API: Generate Automation URL ---
+	mux.HandleFunc("/api/automation/generate", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		email := getUserEmail(r, sessionCookieName)
+		userID, err := dbGetUserIDByEmail(email)
+		if err != nil {
+			fmt.Printf("ERROR: Failed to get user ID for email %s: %v\n", email, err)
+			http.Error(w, "User not found", http.StatusNotFound)
+			return
+		}
+
+		// Create automation webhook (no URL needed for forwarding)
+		webhook := Webhook{
+			ID:          generateWebhookID(),
+			URL:         "", // Empty - no forwarding needed
+			Method:      "POST",
+			FilterType:  "all",
+			FilterValue: "",
+			CreatedAt:   time.Now(),
+		}
+
+		err = dbCreateWebhook(userID, webhook)
+		if err != nil {
+			fmt.Printf("ERROR: Failed to create automation webhook: %v\n", err)
+			http.Error(w, "Failed to create automation URL", http.StatusInternalServerError)
+			return
+		}
+
+		// Get base URL from request
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		automationURL := fmt.Sprintf("%s/webhook/%s", baseURL, webhook.ID)
+
+		fmt.Printf("SUCCESS: Generated automation URL for user %s: %s\n", email, automationURL)
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"automation_url": automationURL,
+			"webhook_id":     webhook.ID,
+			"message":        "Automation URL generated successfully",
+		})
+	})
+
 	// --- API: Recent Chats ---
 	mux.HandleFunc("/api/wa/chats", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("DEBUG: /api/wa/chats called")
@@ -729,26 +787,231 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			return
 		}
 		email := getUserEmail(r, sessionCookieName)
-		fmt.Println("DEBUG: Getting recent chats for:", email)
+		fmt.Println("DEBUG: Getting chats for:", email)
 
-		// Get recent chats for this user
-		chats := getRecentChats(email)
-		fmt.Printf("DEBUG: Found %d recent chats for user %s\n", len(chats), email)
+		// Get WhatsApp client for this user
+		state := getUserWAState(email)
+		state.mu.RLock()
+		client := state.waClient
+		state.mu.RUnlock()
 
-		// If no recent chats available, return empty array
-		if len(chats) == 0 {
-			fmt.Println("DEBUG: No recent chats found, returning empty array")
-			chats = []Chat{} // Ensure it's not nil
+		var allChats []Chat
+
+		if client != nil && client.Store.ID != nil {
+			fmt.Println("DEBUG: WhatsApp client available, fetching contacts and groups")
+
+			// Get contacts from the store
+			contacts, err := client.Store.Contacts.GetAllContacts(context.Background())
+			if err == nil {
+				fmt.Printf("DEBUG: Found %d contacts\n", len(contacts))
+				for jid, contact := range contacts {
+					if jid.Server == "s.whatsapp.net" { // Individual contacts
+						name := contact.FullName
+						if name == "" {
+							name = contact.FirstName
+						}
+						if name == "" {
+							name = contact.PushName
+						}
+						if name == "" {
+							name = jid.User // Use phone number as fallback
+						}
+						
+						allChats = append(allChats, Chat{
+							ID:   jid.String(),
+							Name: name,
+							Type: "chat",
+						})
+					}
+				}
+			} else {
+				fmt.Printf("DEBUG: Error getting contacts: %v\n", err)
+			}
+
+			// Get groups from the store
+			groups, err := client.GetJoinedGroups()
+			if err == nil {
+				fmt.Printf("DEBUG: Found %d groups\n", len(groups))
+				for _, group := range groups {
+					groupName := group.Name
+					if groupName == "" {
+						groupName = "Unnamed Group"
+					}
+					
+					allChats = append(allChats, Chat{
+						ID:   group.JID.String(),
+						Name: groupName,
+						Type: "group",
+					})
+				}
+			} else {
+				fmt.Printf("DEBUG: Error getting groups: %v\n", err)
+			}
+		} else {
+			fmt.Println("DEBUG: WhatsApp client not available or not connected")
+		}
+
+		// If no chats from WhatsApp client, fall back to recent chats
+		if len(allChats) == 0 {
+			fmt.Println("DEBUG: No chats from WhatsApp client, falling back to recent chats")
+			allChats = getRecentChats(email)
+		}
+
+		// Ensure we return an empty array instead of null
+		if allChats == nil {
+			allChats = []Chat{}
 		}
 
 		// Log the chats being returned for debugging
-		for i, chat := range chats {
-			fmt.Printf("DEBUG: Chat %d: ID=%s, Name=%s, Type=%s\n", i+1, chat.ID, chat.Name, chat.Type)
+		fmt.Printf("DEBUG: Returning %d chats for user %s\n", len(allChats), email)
+		for i, chat := range allChats {
+			if i < 5 { // Only log first 5 to avoid spam
+				fmt.Printf("DEBUG: Chat %d: ID=%s, Name=%s, Type=%s\n", i+1, chat.ID, chat.Name, chat.Type)
+			}
+		}
+		if len(allChats) > 5 {
+			fmt.Printf("DEBUG: ... and %d more chats\n", len(allChats)-5)
 		}
 
-		fmt.Printf("DEBUG: Returning %d chats\n", len(chats))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(chats)
+		json.NewEncoder(w).Encode(allChats)
+	})
+
+	// --- API: Health ---
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("[API] /api/health called")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	// --- API: Delete Message ---
+	mux.HandleFunc("/api/messages/delete", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			ChatJID   string `json:"chat_jid"`
+			MessageID string `json:"message_id"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "Missing chat_jid or message_id", http.StatusBadRequest)
+			return
+		}
+
+		email := getUserEmail(r, sessionCookieName)
+		state := getUserWAState(email)
+
+		state.mu.RLock()
+		client := state.waClient
+		state.mu.RUnlock()
+
+		if client == nil {
+			http.Error(w, "WhatsApp client not connected", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Parse chat JID
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			http.Error(w, "Invalid chat JID", http.StatusBadRequest)
+			return
+		}
+
+		// Delete the message
+		_, err = client.RevokeMessage(chatJID, req.MessageID)
+		if err != nil {
+			fmt.Printf("ERROR: Failed to delete message %s in chat %s: %v\n", req.MessageID, req.ChatJID, err)
+			http.Error(w, "Failed to delete message", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Printf("SUCCESS: Deleted message %s in chat %s\n", req.MessageID, req.ChatJID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"message":    "Message deleted successfully",
+			"message_id": req.MessageID,
+			"chat_jid":   req.ChatJID,
+		})
+	})
+
+	// --- API: Send Message ---
+	mux.HandleFunc("/api/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			ChatJID string `json:"chat_jid"`
+			Message string `json:"message"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.Message == "" {
+			http.Error(w, "Missing chat_jid or message", http.StatusBadRequest)
+			return
+		}
+
+		email := getUserEmail(r, sessionCookieName)
+		state := getUserWAState(email)
+
+		state.mu.RLock()
+		client := state.waClient
+		state.mu.RUnlock()
+
+		if client == nil {
+			http.Error(w, "WhatsApp client not connected", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Parse chat JID
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			http.Error(w, "Invalid chat JID", http.StatusBadRequest)
+			return
+		}
+
+		// Send the message
+		msgID, err := client.SendMessage(context.Background(), chatJID, &waProto.Message{
+			Conversation: &req.Message,
+		})
+		if err != nil {
+			fmt.Printf("ERROR: Failed to send message to chat %s: %v\n", req.ChatJID, err)
+			http.Error(w, "Failed to send message", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Printf("SUCCESS: Sent message to chat %s: %s\n", req.ChatJID, req.Message)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"message":    "Message sent successfully",
+			"message_id": msgID,
+			"chat_jid":   req.ChatJID,
+		})
 	})
 
 	// --- Serve media files ---
@@ -777,15 +1040,110 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		io.Copy(w, f)
 	})
 
-	// --- Webhook receiver endpoint (stub) ---
+	// --- Webhook receiver endpoint ---
 	mux.HandleFunc("/webhook/", func(w http.ResponseWriter, r *http.Request) {
 		id := path.Base(r.URL.Path)
 		if id == "" {
 			http.NotFound(w, r)
 			return
 		}
-		// For now, just log the request
+
 		fmt.Printf("Received webhook call for id: %s\n", id)
+
+		// Check if this is a POST request with a body (from n8n)
+		if r.Method == "POST" && r.Body != nil {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+				fmt.Printf("DEBUG: Received JSON payload: %+v\n", payload)
+				// This is likely from n8n - extract message and send to WhatsApp
+				if message, ok := payload["message"].(string); ok && message != "" {
+					fmt.Printf("Received message from webhook %s: %s\n", id, message)
+
+					// Get the webhook owner
+					userID, err := dbGetWebhookOwner(id)
+					if err != nil {
+						fmt.Printf("ERROR: Failed to find webhook owner for ID %s: %v\n", id, err)
+						http.Error(w, "Webhook not found", http.StatusNotFound)
+						return
+					}
+
+					userEmail, err := dbGetUserEmailByID(userID)
+					if err != nil {
+						fmt.Printf("ERROR: Failed to find user email for ID %d: %v\n", userID, err)
+						http.Error(w, "User not found", http.StatusNotFound)
+						return
+					}
+
+					fmt.Printf("DEBUG: Webhook %s belongs to user %s\n", id, userEmail)
+
+					// Get the WhatsApp client for this specific user
+					state := getUserWAState(userEmail)
+					state.mu.RLock()
+					connectedClient := state.waClient
+					waStatus := state.waStatus
+					state.mu.RUnlock()
+
+					if connectedClient == nil || waStatus != "connected" {
+						fmt.Printf("ERROR: User %s WhatsApp not connected (status: %s)\n", userEmail, waStatus)
+						http.Error(w, "WhatsApp not connected for this user", http.StatusServiceUnavailable)
+						return
+					}
+
+					// Try to get chat JID from payload
+					var chatJID types.JID
+					if chatID, ok := payload["chat_id"].(string); ok && chatID != "" {
+						if parsedJID, err := types.ParseJID(chatID); err == nil {
+							chatJID = parsedJID
+						} else {
+							fmt.Printf("ERROR: Invalid chat_id format: %s\n", chatID)
+							http.Error(w, "Invalid chat_id format", http.StatusBadRequest)
+							return
+						}
+					} else if groupID, ok := payload["groupId"].(string); ok && groupID != "" {
+						// Support legacy groupId field
+						if parsedJID, err := types.ParseJID(groupID); err == nil {
+							chatJID = parsedJID
+						}
+					} else {
+						fmt.Printf("ERROR: No chat_id or groupId provided in payload\n")
+						http.Error(w, "Missing chat_id field", http.StatusBadRequest)
+						return
+					}
+
+					// Send the message to WhatsApp
+					msgID, err := connectedClient.SendMessage(context.Background(), chatJID, &waProto.Message{
+						Conversation: &message,
+					})
+					if err != nil {
+						fmt.Printf("ERROR: Failed to send message to WhatsApp: %v\n", err)
+						http.Error(w, "Failed to send message", http.StatusInternalServerError)
+						return
+					}
+					fmt.Printf("SUCCESS: Sent message to WhatsApp via user %s: %s (ID: %s)\n", userEmail, message, msgID)
+					
+					// Return success response
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success":    true,
+						"message":    "Message sent successfully",
+						"message_id": msgID,
+						"chat_id":    chatJID.String(),
+					})
+					return
+				} else {
+					fmt.Printf("DEBUG: No message field found in payload\n")
+					http.Error(w, "Missing message field", http.StatusBadRequest)
+					return
+				}
+			} else {
+				fmt.Printf("DEBUG: Failed to parse JSON body: %v\n", err)
+				http.Error(w, "Invalid JSON", http.StatusBadRequest)
+				return
+			}
+		} else {
+			fmt.Printf("DEBUG: Not a POST request or no body\n")
+		}
+
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"success":true}`))
 	})
@@ -1145,4 +1503,42 @@ func dbListWebhooks(userID int64) ([]Webhook, error) {
 func dbDeleteWebhook(userID int64, webhookID string) error {
 	_, err := db.Exec(`DELETE FROM webhooks WHERE user_id = ? AND id = ?`, userID, webhookID)
 	return err
+}
+
+// Get webhook owner by webhook ID
+func dbGetWebhookOwner(webhookID string) (int64, error) {
+	var userID int64
+	err := db.QueryRow(`SELECT user_id FROM webhooks WHERE id = ?`, webhookID).Scan(&userID)
+	return userID, err
+}
+
+// Get user email by user ID
+func dbGetUserEmailByID(userID int64) (string, error) {
+	var email string
+	err := db.QueryRow(`SELECT email FROM users WHERE id = ?`, userID).Scan(&email)
+	return email, err
+}
+
+// Get user ID by email
+func dbGetUserIDByEmail(email string) (int64, error) {
+	var userID int64
+	err := db.QueryRow(`SELECT id FROM users WHERE email = ?`, email).Scan(&userID)
+	return userID, err
+}
+
+// CORS middleware
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("[CORS] %s %s from %s\n", r.Method, r.URL.Path, r.Header.Get("Origin"))
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		if r.Method == "OPTIONS" {
+			fmt.Println("[CORS] Preflight OPTIONS request handled")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

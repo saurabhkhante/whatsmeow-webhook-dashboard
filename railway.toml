@@ -1,0 +1,19 @@
+[build]
+builder = "dockerfile"
+buildCommand = "docker build -t whatsapp-server ."
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[[deploy.volumes]]
+mountPath = "/app/data"
+
+[variables]
+PORT = "8080"
+MEDIA_DIR = "/app/data/media"
+DB_PATH = "/app/data/db/whatsmeow.db"
+SESSION_COOKIE_NAME = "whatsapp_session"
+WA_SESSION_PREFIX = "whatsmeow_"

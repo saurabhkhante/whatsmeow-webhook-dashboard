@@ -29,7 +29,46 @@ import (
 
 var (
 	db *sql.DB
+	// Anti-detection and queue system
+	messageQueues = make(map[string]*MessageQueue) // Per user message queues
+	queueMutex    sync.RWMutex
 )
+
+// --- Anti-detection constants ---
+const (
+	MESSAGE_DELAY         = 1 * time.Second    // 1 message per second
+	BURST_ALLOWANCE      = 5                   // Allow 5 rapid messages
+	BURST_COOLDOWN       = 3 * time.Second     // Then 3 second cooldown
+	MAX_QUEUE_PER_USER   = 50                  // Max messages in queue per user
+	MAX_RETRIES          = 3                   // Retry failed messages 3 times
+	MAX_HOURLY_MESSAGES  = 200                 // Per user hourly limit
+	MAX_DAILY_MESSAGES   = 1000                // Per user daily limit
+)
+
+// --- Message Queue System ---
+type QueuedMessage struct {
+	ID          string    `json:"id"`
+	UserEmail   string    `json:"user_email"`
+	ChatJID     string    `json:"chat_jid"`
+	Message     string    `json:"message"`
+	CallbackURL string    `json:"callback_url,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	Retries     int       `json:"retries"`
+	Status      string    `json:"status"` // "queued", "sending", "sent", "failed"
+}
+
+type MessageQueue struct {
+	UserEmail      string
+	Messages       []*QueuedMessage
+	LastSent       time.Time
+	BurstCount     int
+	HourlyCount    int
+	DailyCount     int
+	HourlyReset    time.Time
+	DailyReset     time.Time
+	IsProcessing   bool
+	mu             sync.RWMutex
+}
 
 // --- Webhook log storage (in-memory, per webhook) ---
 type WebhookLogEntry struct {
@@ -106,6 +145,389 @@ func generateWebhookID() string {
 	return string(b)
 }
 
+// --- Queue Management Functions ---
+
+func generateMessageID() string {
+	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	b := make([]rune, 12)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return "msg_" + string(b)
+}
+
+func getOrCreateQueue(userEmail string) *MessageQueue {
+	queueMutex.Lock()
+	defer queueMutex.Unlock()
+	
+	if queue, exists := messageQueues[userEmail]; exists {
+		return queue
+	}
+	
+	now := time.Now()
+	queue := &MessageQueue{
+		UserEmail:   userEmail,
+		Messages:    make([]*QueuedMessage, 0),
+		HourlyReset: now.Add(time.Hour),
+		DailyReset:  now.Add(24 * time.Hour),
+	}
+	messageQueues[userEmail] = queue
+	return queue
+}
+
+func (q *MessageQueue) canSendMessage() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	
+	now := time.Now()
+	
+	// Reset counters if needed
+	if now.After(q.HourlyReset) {
+		q.HourlyCount = 0
+		q.HourlyReset = now.Add(time.Hour)
+	}
+	if now.After(q.DailyReset) {
+		q.DailyCount = 0
+		q.DailyReset = now.Add(24 * time.Hour)
+	}
+	
+	// Check daily limit
+	if q.DailyCount >= MAX_DAILY_MESSAGES {
+		return false
+	}
+	
+	// Check hourly limit
+	if q.HourlyCount >= MAX_HOURLY_MESSAGES {
+		return false
+	}
+	
+	return true
+}
+
+func (q *MessageQueue) addMessage(msg *QueuedMessage) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	
+	if len(q.Messages) >= MAX_QUEUE_PER_USER {
+		return fmt.Errorf("queue full (max %d messages)", MAX_QUEUE_PER_USER)
+	}
+	
+	q.Messages = append(q.Messages, msg)
+	
+	// Start processing if not already running
+	if !q.IsProcessing {
+		q.IsProcessing = true
+		go q.processQueue()
+	}
+	
+	return nil
+}
+
+func (q *MessageQueue) getQueuePosition(msgID string) int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	
+	for i, msg := range q.Messages {
+		if msg.ID == msgID {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+func (q *MessageQueue) estimateDelay(position int) time.Duration {
+	if position <= 0 {
+		return 0
+	}
+	
+	baseDelay := time.Duration(position-1) * MESSAGE_DELAY
+	
+	// Add burst cooldown if we're past burst allowance
+	burstCycles := (position - 1) / BURST_ALLOWANCE
+	if burstCycles > 0 {
+		baseDelay += time.Duration(burstCycles) * BURST_COOLDOWN
+	}
+	
+	return baseDelay
+}
+
+// --- Anti-Detection Functions ---
+
+func addHumanDelay() {
+	// Random delay between 500ms-2000ms to simulate human typing
+	delay := time.Duration(500+rand.Intn(1500)) * time.Millisecond
+	time.Sleep(delay)
+}
+
+func simulateTyping(client *whatsmeow.Client, chatJID types.JID, message string) {
+	if client == nil {
+		return
+	}
+	
+	// Calculate typing duration based on message length (simulate ~50 chars per second)
+	typingDuration := time.Duration(len(message)*20) * time.Millisecond
+	if typingDuration > 5*time.Second {
+		typingDuration = 5 * time.Second
+	}
+	if typingDuration < 500*time.Millisecond {
+		typingDuration = 500 * time.Millisecond
+	}
+	
+	// Send typing indicator
+	client.SendChatPresence(chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+	time.Sleep(typingDuration)
+	client.SendChatPresence(chatJID, types.ChatPresencePaused, types.ChatPresenceMediaText)
+	
+	// Small pause after typing before sending
+	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+}
+
+func isSpamPattern(message string, userEmail string) bool {
+	// Convert to lowercase for case-insensitive checking
+	lowerMsg := strings.ToLower(message)
+	
+	// Spam keywords to avoid
+	spamKeywords := []string{
+		"buy now", "limited time", "click here", "free money", "earn money",
+		"get rich", "make money fast", "investment opportunity", "guaranteed profit",
+		"call now", "act now", "offer expires", "special deal", "discount",
+		"promotion", "sale", "bitcoin", "crypto investment", "trading bot",
+		"mlm", "pyramid", "referral bonus", "commission", "affiliate",
+	}
+	
+	// Check for spam keywords
+	for _, keyword := range spamKeywords {
+		if strings.Contains(lowerMsg, keyword) {
+			fmt.Printf("WARNING: Potential spam detected in message from %s: contains '%s'\n", userEmail, keyword)
+			return true
+		}
+	}
+	
+	// Check for excessive capitalization (more than 70% caps)
+	if len(message) > 10 {
+		capsCount := 0
+		letterCount := 0
+		for _, char := range message {
+			if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') {
+				letterCount++
+				if char >= 'A' && char <= 'Z' {
+					capsCount++
+				}
+			}
+		}
+		if letterCount > 0 && float64(capsCount)/float64(letterCount) > 0.7 {
+			fmt.Printf("WARNING: Excessive capitalization detected in message from %s\n", userEmail)
+			return true
+		}
+	}
+	
+	// Check for excessive repetition of characters
+	if len(message) > 5 {
+		for i := 0; i < len(message)-4; i++ {
+			char := message[i]
+			if char != ' ' {
+				repeatCount := 1
+				for j := i + 1; j < len(message) && j < i+10; j++ {
+					if message[j] == char {
+						repeatCount++
+					} else {
+						break
+					}
+				}
+				if repeatCount >= 5 {
+					fmt.Printf("WARNING: Excessive character repetition detected in message from %s\n", userEmail)
+					return true
+				}
+			}
+		}
+	}
+	
+	// Check for excessive emojis (more than 30% of message)
+	emojiCount := 0
+	runeCount := 0
+	for _, r := range message {
+		runeCount++
+		// Simple emoji detection (Unicode ranges)
+		if (r >= 0x1F600 && r <= 0x1F64F) || // Emoticons
+		   (r >= 0x1F300 && r <= 0x1F5FF) || // Misc symbols
+		   (r >= 0x1F680 && r <= 0x1F6FF) || // Transport
+		   (r >= 0x2600 && r <= 0x26FF) ||   // Misc symbols
+		   (r >= 0x2700 && r <= 0x27BF) {    // Dingbats
+			emojiCount++
+		}
+	}
+	if runeCount > 0 && float64(emojiCount)/float64(runeCount) > 0.3 {
+		fmt.Printf("WARNING: Excessive emojis detected in message from %s\n", userEmail)
+		return true
+	}
+	
+	return false
+}
+
+func sendCallback(callbackURL, queueID, status string, messageID interface{}) {
+	if callbackURL == "" {
+		return
+	}
+	
+	payload := map[string]interface{}{
+		"queue_id": queueID,
+		"status":   status,
+		"sent_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+	
+	if messageID != nil {
+		payload["message_id"] = messageID
+	}
+	
+	payloadBytes, _ := json.Marshal(payload)
+	
+	go func() {
+		resp, err := http.Post(callbackURL, "application/json", bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			fmt.Printf("ERROR: Failed to send callback to %s: %v\n", callbackURL, err)
+			return
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			fmt.Printf("SUCCESS: Callback sent to %s for queue %s\n", callbackURL, queueID)
+		} else {
+			fmt.Printf("WARNING: Callback to %s returned status %d for queue %s\n", callbackURL, resp.StatusCode, queueID)
+		}
+	}()
+}
+
+// --- Queue Processing ---
+
+func (q *MessageQueue) processQueue() {
+	defer func() {
+		q.mu.Lock()
+		q.IsProcessing = false
+		q.mu.Unlock()
+	}()
+	
+	for {
+		q.mu.Lock()
+		if len(q.Messages) == 0 {
+			q.mu.Unlock()
+			break
+		}
+		
+		// Get the next message
+		msg := q.Messages[0]
+		q.Messages = q.Messages[1:]
+		q.mu.Unlock()
+		
+		// Check if we can send (rate limiting)
+		if !q.canSendMessage() {
+			// Put message back at front and wait
+			q.mu.Lock()
+			q.Messages = append([]*QueuedMessage{msg}, q.Messages...)
+			q.mu.Unlock()
+			time.Sleep(time.Minute) // Wait a minute before retrying
+			continue
+		}
+		
+		// Apply rate limiting delays
+		q.mu.Lock()
+		now := time.Now()
+		
+		// Check if we need burst cooldown
+		if q.BurstCount >= BURST_ALLOWANCE {
+			timeSinceLastBurst := now.Sub(q.LastSent)
+			if timeSinceLastBurst < BURST_COOLDOWN {
+				waitTime := BURST_COOLDOWN - timeSinceLastBurst
+				q.mu.Unlock()
+				fmt.Printf("INFO: Burst cooldown, waiting %v for user %s\n", waitTime, q.UserEmail)
+				time.Sleep(waitTime)
+				q.mu.Lock()
+				q.BurstCount = 0 // Reset burst count after cooldown
+			} else {
+				q.BurstCount = 0 // Reset if enough time has passed
+			}
+		}
+		
+		// Apply normal message delay
+		if !q.LastSent.IsZero() {
+			timeSinceLastMessage := now.Sub(q.LastSent)
+			if timeSinceLastMessage < MESSAGE_DELAY {
+				waitTime := MESSAGE_DELAY - timeSinceLastMessage
+				q.mu.Unlock()
+				time.Sleep(waitTime)
+				q.mu.Lock()
+			}
+		}
+		
+		q.mu.Unlock()
+		
+		// Send the message
+		success := q.sendMessage(msg)
+		
+		q.mu.Lock()
+		if success {
+			q.LastSent = time.Now()
+			q.BurstCount++
+			q.HourlyCount++
+			q.DailyCount++
+			msg.Status = "sent"
+			fmt.Printf("SUCCESS: Sent queued message %s for user %s\n", msg.ID, q.UserEmail)
+		} else {
+			msg.Retries++
+			if msg.Retries < MAX_RETRIES {
+				// Put back in queue for retry
+				q.Messages = append(q.Messages, msg)
+				msg.Status = "retrying"
+				fmt.Printf("RETRY: Message %s failed, retry %d/%d for user %s\n", msg.ID, msg.Retries, MAX_RETRIES, q.UserEmail)
+			} else {
+				msg.Status = "failed"
+				fmt.Printf("FAILED: Message %s failed permanently after %d retries for user %s\n", msg.ID, MAX_RETRIES, q.UserEmail)
+				sendCallback(msg.CallbackURL, msg.ID, "failed", nil)
+			}
+		}
+		q.mu.Unlock()
+		
+		// Random delay between messages to appear more human
+		addHumanDelay()
+	}
+}
+
+func (q *MessageQueue) sendMessage(msg *QueuedMessage) bool {
+	// Get WhatsApp client for this user
+	state := getUserWAState(msg.UserEmail)
+	state.mu.RLock()
+	client := state.waClient
+	state.mu.RUnlock()
+	
+	if client == nil {
+		fmt.Printf("ERROR: WhatsApp client not connected for user %s\n", msg.UserEmail)
+		return false
+	}
+	
+	// Parse chat JID
+	chatJID, err := types.ParseJID(msg.ChatJID)
+	if err != nil {
+		fmt.Printf("ERROR: Invalid chat JID %s: %v\n", msg.ChatJID, err)
+		return false
+	}
+	
+	// Anti-detection: simulate human behavior
+	simulateTyping(client, chatJID, msg.Message)
+	
+	// Send the message
+	msgID, err := client.SendMessage(context.Background(), chatJID, &waProto.Message{
+		Conversation: &msg.Message,
+	})
+	if err != nil {
+		fmt.Printf("ERROR: Failed to send message %s: %v\n", msg.ID, err)
+		return false
+	}
+	
+	// Send success callback
+	sendCallback(msg.CallbackURL, msg.ID, "sent", msgID)
+	
+	return true
+}
+
 // Helper: get the logged-in user's email from the session cookie
 func getUserEmail(r *http.Request, sessionCookieName string) string {
 	cookie, err := r.Cookie(sessionCookieName)
@@ -178,17 +600,18 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 	fmt.Printf("DEBUG: [FORWARD] userID: %d\n", userID)
 
 	// Extract message info for filtering and chat tracking
-	fromJID, _ := payload["from"].(string)
+	fromJID, _ := payload["from"].(string)     // Individual sender
+	chatJID, _ := payload["to"].(string)       // Chat/Group where message was sent
 	fromName, _ := payload["name"].(string)
-	fmt.Printf("DEBUG: Message from JID: %s, Name: %s\n", fromJID, fromName)
+	fmt.Printf("DEBUG: Message from JID: %s, in Chat: %s, Name: %s\n", fromJID, chatJID, fromName)
 
-	// Track recent chat for this user
-	if fromJID != "" {
+	// Track recent chat for this user (use chatJID for tracking, not fromJID)
+	if chatJID != "" {
 		chatType := "chat"
-		if strings.HasSuffix(fromJID, "@g.us") {
+		if strings.HasSuffix(chatJID, "@g.us") {
 			chatType = "group"
 		}
-		addRecentChat(email, fromJID, fromName, chatType)
+		addRecentChat(email, chatJID, fromName, chatType)
 	}
 
 	// Load webhooks from the database for this user
@@ -217,17 +640,23 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 			shouldForward = true
 			fmt.Printf("DEBUG: Webhook %s accepts all messages\n", wh.ID)
 		case "group":
-			if fromJID != "" && strings.HasSuffix(fromJID, "@g.us") {
-				if wh.FilterValue == "" || fromJID == wh.FilterValue {
+			// For group filter, compare chatJID (where message was sent) with filter_value
+			if chatJID != "" && strings.HasSuffix(chatJID, "@g.us") {
+				if wh.FilterValue == "" || chatJID == wh.FilterValue {
 					shouldForward = true
-					fmt.Printf("DEBUG: Webhook %s accepts group message from %s\n", wh.ID, fromJID)
+					fmt.Printf("DEBUG: Webhook %s accepts group message in chat %s\n", wh.ID, chatJID)
+				} else {
+					fmt.Printf("DEBUG: Webhook %s rejects group message - expected %s, got %s\n", wh.ID, wh.FilterValue, chatJID)
 				}
 			}
 		case "chat":
-			if fromJID != "" && strings.HasSuffix(fromJID, "@s.whatsapp.net") {
-				if wh.FilterValue == "" || fromJID == wh.FilterValue {
+			// For chat filter, compare chatJID (where message was sent) with filter_value
+			if chatJID != "" && strings.HasSuffix(chatJID, "@s.whatsapp.net") {
+				if wh.FilterValue == "" || chatJID == wh.FilterValue {
 					shouldForward = true
-					fmt.Printf("DEBUG: Webhook %s accepts chat message from %s\n", wh.ID, fromJID)
+					fmt.Printf("DEBUG: Webhook %s accepts chat message in chat %s\n", wh.ID, chatJID)
+				} else {
+					fmt.Printf("DEBUG: Webhook %s rejects chat message - expected %s, got %s\n", wh.ID, wh.FilterValue, chatJID)
 				}
 			}
 		}
@@ -778,6 +1207,119 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		})
 	})
 
+	// --- API: Queue Status ---
+	mux.HandleFunc("/api/queue/status", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		email := getUserEmail(r, sessionCookieName)
+		
+		// Get queue for this user
+		queueMutex.RLock()
+		queue, exists := messageQueues[email]
+		queueMutex.RUnlock()
+		
+		if !exists {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"queue_length":    0,
+				"messages":        []interface{}{},
+				"hourly_count":    0,
+				"daily_count":     0,
+				"hourly_limit":    MAX_HOURLY_MESSAGES,
+				"daily_limit":     MAX_DAILY_MESSAGES,
+			})
+			return
+		}
+
+		queue.mu.RLock()
+		
+		// Prepare queue status
+		messages := make([]map[string]interface{}, len(queue.Messages))
+		for i, msg := range queue.Messages {
+			messages[i] = map[string]interface{}{
+				"id":         msg.ID,
+				"chat_jid":   msg.ChatJID,
+				"message":    msg.Message,
+				"status":     msg.Status,
+				"created_at": msg.CreatedAt,
+				"retries":    msg.Retries,
+				"position":   i + 1,
+			}
+		}
+		
+		response := map[string]interface{}{
+			"queue_length":     len(queue.Messages),
+			"messages":         messages,
+			"hourly_count":     queue.HourlyCount,
+			"daily_count":      queue.DailyCount,
+			"hourly_limit":     MAX_HOURLY_MESSAGES,
+			"daily_limit":      MAX_DAILY_MESSAGES,
+			"hourly_remaining": MAX_HOURLY_MESSAGES - queue.HourlyCount,
+			"daily_remaining":  MAX_DAILY_MESSAGES - queue.DailyCount,
+			"is_processing":    queue.IsProcessing,
+			"last_sent":        queue.LastSent,
+		}
+		
+		queue.mu.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	})
+
+	// --- API: Specific Message Status ---
+	mux.HandleFunc("/api/queue/message/", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		messageID := path.Base(r.URL.Path)
+		if messageID == "" {
+			http.Error(w, "Missing message ID", http.StatusBadRequest)
+			return
+		}
+
+		email := getUserEmail(r, sessionCookieName)
+		
+		// Get queue for this user
+		queueMutex.RLock()
+		queue, exists := messageQueues[email]
+		queueMutex.RUnlock()
+		
+		if !exists {
+			http.Error(w, "Queue not found", http.StatusNotFound)
+			return
+		}
+
+		queue.mu.RLock()
+		defer queue.mu.RUnlock()
+		
+		// Find the message
+		for i, msg := range queue.Messages {
+			if msg.ID == messageID {
+				response := map[string]interface{}{
+					"id":         msg.ID,
+					"chat_jid":   msg.ChatJID,
+					"message":    msg.Message,
+					"status":     msg.Status,
+					"created_at": msg.CreatedAt,
+					"retries":    msg.Retries,
+					"position":   i + 1,
+					"estimated_delay": queue.estimateDelay(i + 1).Seconds(),
+				}
+				
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		}
+		
+		http.Error(w, "Message not found in queue", http.StatusNotFound)
+	})
+
 	// --- API: Recent Chats ---
 	mux.HandleFunc("/api/wa/chats", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("DEBUG: /api/wa/chats called")
@@ -948,7 +1490,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		})
 	})
 
-	// --- API: Send Message ---
+	// --- API: Send Message (with Queue System) ---
 	mux.HandleFunc("/api/messages/send", func(w http.ResponseWriter, r *http.Request) {
 		if !isAuthenticated(r, sessionCookieName) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -961,8 +1503,9 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 
 		var req struct {
-			ChatJID string `json:"chat_jid"`
-			Message string `json:"message"`
+			ChatJID     string `json:"chat_jid"`
+			Message     string `json:"message"`
+			CallbackURL string `json:"callback_url,omitempty"` // Optional callback URL
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -976,8 +1519,16 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 
 		email := getUserEmail(r, sessionCookieName)
+		
+		// Check for spam patterns
+		if isSpamPattern(req.Message, email) {
+			fmt.Printf("WARNING: Blocked potential spam message from %s\n", email)
+			http.Error(w, "Message blocked: potential spam detected", http.StatusBadRequest)
+			return
+		}
+		
+		// Check if WhatsApp is connected
 		state := getUserWAState(email)
-
 		state.mu.RLock()
 		client := state.waClient
 		state.mu.RUnlock()
@@ -987,30 +1538,62 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			return
 		}
 
-		// Parse chat JID
-		chatJID, err := types.ParseJID(req.ChatJID)
+		// Validate chat JID
+		_, err := types.ParseJID(req.ChatJID)
 		if err != nil {
 			http.Error(w, "Invalid chat JID", http.StatusBadRequest)
 			return
 		}
 
-		// Send the message
-		msgID, err := client.SendMessage(context.Background(), chatJID, &waProto.Message{
-			Conversation: &req.Message,
-		})
-		if err != nil {
-			fmt.Printf("ERROR: Failed to send message to chat %s: %v\n", req.ChatJID, err)
-			http.Error(w, "Failed to send message", http.StatusInternalServerError)
+		// Get or create queue for this user
+		queue := getOrCreateQueue(email)
+		
+		// Check if queue can accept messages
+		if !queue.canSendMessage() {
+			http.Error(w, "Daily or hourly message limit reached", http.StatusTooManyRequests)
 			return
 		}
 
-		fmt.Printf("SUCCESS: Sent message to chat %s: %s\n", req.ChatJID, req.Message)
+		// Create queued message
+		queuedMsg := &QueuedMessage{
+			ID:          generateMessageID(),
+			UserEmail:   email,
+			ChatJID:     req.ChatJID,
+			Message:     req.Message,
+			CallbackURL: req.CallbackURL,
+			CreatedAt:   time.Now(),
+			Status:      "queued",
+		}
+
+		// Debug logging
+		if req.CallbackURL != "" {
+			fmt.Printf("DEBUG: Callback URL received: %s for message %s\n", req.CallbackURL, queuedMsg.ID)
+		} else {
+			fmt.Printf("DEBUG: No callback URL provided for message %s\n", queuedMsg.ID)
+		}
+
+		// Add to queue
+		err = queue.addMessage(queuedMsg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
+		// Get queue position and estimated delay
+		position := queue.getQueuePosition(queuedMsg.ID)
+		estimatedDelay := queue.estimateDelay(position)
+
+		fmt.Printf("SUCCESS: Queued message %s for user %s (position: %d)\n", queuedMsg.ID, email, position)
+		
+		// Return immediate response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":    true,
-			"message":    "Message sent successfully",
-			"message_id": msgID,
-			"chat_jid":   req.ChatJID,
+			"success":         true,
+			"status":          "queued",
+			"queue_id":        queuedMsg.ID,
+			"position":        position,
+			"estimated_delay": fmt.Sprintf("%.0f seconds", estimatedDelay.Seconds()),
+			"message":         "Message queued successfully",
 		})
 	})
 
@@ -1076,6 +1659,13 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 
 					fmt.Printf("DEBUG: Webhook %s belongs to user %s\n", id, userEmail)
 
+					// Check for spam patterns
+					if isSpamPattern(message, userEmail) {
+						fmt.Printf("WARNING: Blocked potential spam message from webhook %s (user %s)\n", id, userEmail)
+						http.Error(w, "Message blocked: potential spam detected", http.StatusBadRequest)
+						return
+					}
+
 					// Get the WhatsApp client for this specific user
 					state := getUserWAState(userEmail)
 					state.mu.RLock()
@@ -1110,24 +1700,55 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 						return
 					}
 
-					// Send the message to WhatsApp
-					msgID, err := connectedClient.SendMessage(context.Background(), chatJID, &waProto.Message{
-						Conversation: &message,
-					})
-					if err != nil {
-						fmt.Printf("ERROR: Failed to send message to WhatsApp: %v\n", err)
-						http.Error(w, "Failed to send message", http.StatusInternalServerError)
+					// Get or create queue for this user
+					queue := getOrCreateQueue(userEmail)
+					
+					// Check if queue can accept messages
+					if !queue.canSendMessage() {
+						http.Error(w, "Daily or hourly message limit reached for this user", http.StatusTooManyRequests)
 						return
 					}
-					fmt.Printf("SUCCESS: Sent message to WhatsApp via user %s: %s (ID: %s)\n", userEmail, message, msgID)
+
+					// Check for optional callback URL in payload
+					callbackURL := ""
+					if callback, ok := payload["callback_url"].(string); ok {
+						callbackURL = callback
+					}
+
+					// Create queued message
+					queuedMsg := &QueuedMessage{
+						ID:          generateMessageID(),
+						UserEmail:   userEmail,
+						ChatJID:     chatJID.String(),
+						Message:     message,
+						CallbackURL: callbackURL,
+						CreatedAt:   time.Now(),
+						Status:      "queued",
+					}
+
+					// Add to queue
+					err = queue.addMessage(queuedMsg)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusServiceUnavailable)
+						return
+					}
+
+					// Get queue position and estimated delay
+					position := queue.getQueuePosition(queuedMsg.ID)
+					estimatedDelay := queue.estimateDelay(position)
+
+					fmt.Printf("SUCCESS: Queued webhook message %s for user %s (position: %d)\n", queuedMsg.ID, userEmail, position)
 					
-					// Return success response
+					// Return immediate queue response
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]interface{}{
-						"success":    true,
-						"message":    "Message sent successfully",
-						"message_id": msgID,
-						"chat_id":    chatJID.String(),
+						"success":         true,
+						"status":          "queued",
+						"queue_id":        queuedMsg.ID,
+						"position":        position,
+						"estimated_delay": fmt.Sprintf("%.0f seconds", estimatedDelay.Seconds()),
+						"message":         "Message queued successfully",
+						"chat_id":         chatJID.String(),
 					})
 					return
 				} else {

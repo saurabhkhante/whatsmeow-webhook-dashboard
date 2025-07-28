@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,13 +38,13 @@ var (
 
 // --- Anti-detection constants ---
 const (
-	MESSAGE_DELAY         = 1 * time.Second    // 1 message per second
-	BURST_ALLOWANCE      = 5                   // Allow 5 rapid messages
-	BURST_COOLDOWN       = 3 * time.Second     // Then 3 second cooldown
-	MAX_QUEUE_PER_USER   = 50                  // Max messages in queue per user
-	MAX_RETRIES          = 3                   // Retry failed messages 3 times
-	MAX_HOURLY_MESSAGES  = 200                 // Per user hourly limit
-	MAX_DAILY_MESSAGES   = 1000                // Per user daily limit
+	MESSAGE_DELAY       = 1 * time.Second // 1 message per second
+	BURST_ALLOWANCE     = 5               // Allow 5 rapid messages
+	BURST_COOLDOWN      = 3 * time.Second // Then 3 second cooldown
+	MAX_QUEUE_PER_USER  = 50              // Max messages in queue per user
+	MAX_RETRIES         = 3               // Retry failed messages 3 times
+	MAX_HOURLY_MESSAGES = 200             // Per user hourly limit
+	MAX_DAILY_MESSAGES  = 1000            // Per user daily limit
 )
 
 // --- Message Queue System ---
@@ -58,16 +60,16 @@ type QueuedMessage struct {
 }
 
 type MessageQueue struct {
-	UserEmail      string
-	Messages       []*QueuedMessage
-	LastSent       time.Time
-	BurstCount     int
-	HourlyCount    int
-	DailyCount     int
-	HourlyReset    time.Time
-	DailyReset     time.Time
-	IsProcessing   bool
-	mu             sync.RWMutex
+	UserEmail    string
+	Messages     []*QueuedMessage
+	LastSent     time.Time
+	BurstCount   int
+	HourlyCount  int
+	DailyCount   int
+	HourlyReset  time.Time
+	DailyReset   time.Time
+	IsProcessing bool
+	mu           sync.RWMutex
 }
 
 // --- Webhook log storage (in-memory, per webhook) ---
@@ -136,11 +138,37 @@ func isAuthenticated(r *http.Request, sessionCookieName string) bool {
 	return err == nil && cookie.Value != ""
 }
 
+// API key authentication middleware
+func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		apiKey := r.Header.Get("X-API-Key")
+		fmt.Printf("DEBUG: Received API key: '%s'\n", apiKey)
+		if apiKey == "" {
+			fmt.Printf("DEBUG: No API key provided\n")
+			http.Error(w, "Missing API key. Include X-API-Key header.", 401)
+			return
+		}
+
+		userID := getUserIDByAPIKey(apiKey)
+		fmt.Printf("DEBUG: API key '%s' maps to user ID: %d\n", apiKey, userID)
+		if userID == 0 {
+			fmt.Printf("DEBUG: Invalid API key: '%s'\n", apiKey)
+			http.Error(w, "Invalid API key", 401)
+			return
+		}
+
+		fmt.Printf("DEBUG: API key authentication successful for user ID: %d\n", userID)
+		// Add user ID to request context for later use
+		ctx := context.WithValue(r.Context(), "userID", userID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 func generateWebhookID() string {
 	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 	b := make([]rune, 16)
 	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+		b[i] = letters[mathrand.Intn(len(letters))]
 	}
 	return string(b)
 }
@@ -151,7 +179,7 @@ func generateMessageID() string {
 	letters := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 	b := make([]rune, 12)
 	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+		b[i] = letters[mathrand.Intn(len(letters))]
 	}
 	return "msg_" + string(b)
 }
@@ -159,11 +187,11 @@ func generateMessageID() string {
 func getOrCreateQueue(userEmail string) *MessageQueue {
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
-	
+
 	if queue, exists := messageQueues[userEmail]; exists {
 		return queue
 	}
-	
+
 	now := time.Now()
 	queue := &MessageQueue{
 		UserEmail:   userEmail,
@@ -178,9 +206,9 @@ func getOrCreateQueue(userEmail string) *MessageQueue {
 func (q *MessageQueue) canSendMessage() bool {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	
+
 	now := time.Now()
-	
+
 	// Reset counters if needed
 	if now.After(q.HourlyReset) {
 		q.HourlyCount = 0
@@ -190,43 +218,43 @@ func (q *MessageQueue) canSendMessage() bool {
 		q.DailyCount = 0
 		q.DailyReset = now.Add(24 * time.Hour)
 	}
-	
+
 	// Check daily limit
 	if q.DailyCount >= MAX_DAILY_MESSAGES {
 		return false
 	}
-	
+
 	// Check hourly limit
 	if q.HourlyCount >= MAX_HOURLY_MESSAGES {
 		return false
 	}
-	
+
 	return true
 }
 
 func (q *MessageQueue) addMessage(msg *QueuedMessage) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	
+
 	if len(q.Messages) >= MAX_QUEUE_PER_USER {
 		return fmt.Errorf("queue full (max %d messages)", MAX_QUEUE_PER_USER)
 	}
-	
+
 	q.Messages = append(q.Messages, msg)
-	
+
 	// Start processing if not already running
 	if !q.IsProcessing {
 		q.IsProcessing = true
 		go q.processQueue()
 	}
-	
+
 	return nil
 }
 
 func (q *MessageQueue) getQueuePosition(msgID string) int {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	
+
 	for i, msg := range q.Messages {
 		if msg.ID == msgID {
 			return i + 1
@@ -239,15 +267,15 @@ func (q *MessageQueue) estimateDelay(position int) time.Duration {
 	if position <= 0 {
 		return 0
 	}
-	
+
 	baseDelay := time.Duration(position-1) * MESSAGE_DELAY
-	
+
 	// Add burst cooldown if we're past burst allowance
 	burstCycles := (position - 1) / BURST_ALLOWANCE
 	if burstCycles > 0 {
 		baseDelay += time.Duration(burstCycles) * BURST_COOLDOWN
 	}
-	
+
 	return baseDelay
 }
 
@@ -255,7 +283,7 @@ func (q *MessageQueue) estimateDelay(position int) time.Duration {
 
 func addHumanDelay() {
 	// Random delay between 500ms-2000ms to simulate human typing
-	delay := time.Duration(500+rand.Intn(1500)) * time.Millisecond
+	delay := time.Duration(500+mathrand.Intn(1500)) * time.Millisecond
 	time.Sleep(delay)
 }
 
@@ -263,7 +291,7 @@ func simulateTyping(client *whatsmeow.Client, chatJID types.JID, message string)
 	if client == nil {
 		return
 	}
-	
+
 	// Calculate typing duration based on message length (simulate ~50 chars per second)
 	typingDuration := time.Duration(len(message)*20) * time.Millisecond
 	if typingDuration > 5*time.Second {
@@ -272,20 +300,20 @@ func simulateTyping(client *whatsmeow.Client, chatJID types.JID, message string)
 	if typingDuration < 500*time.Millisecond {
 		typingDuration = 500 * time.Millisecond
 	}
-	
+
 	// Send typing indicator
 	client.SendChatPresence(chatJID, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 	time.Sleep(typingDuration)
 	client.SendChatPresence(chatJID, types.ChatPresencePaused, types.ChatPresenceMediaText)
-	
+
 	// Small pause after typing before sending
-	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+	time.Sleep(time.Duration(100+mathrand.Intn(300)) * time.Millisecond)
 }
 
 func isSpamPattern(message string, userEmail string) bool {
 	// Convert to lowercase for case-insensitive checking
 	lowerMsg := strings.ToLower(message)
-	
+
 	// Spam keywords to avoid
 	spamKeywords := []string{
 		"buy now", "limited time", "click here", "free money", "earn money",
@@ -294,7 +322,7 @@ func isSpamPattern(message string, userEmail string) bool {
 		"promotion", "sale", "bitcoin", "crypto investment", "trading bot",
 		"mlm", "pyramid", "referral bonus", "commission", "affiliate",
 	}
-	
+
 	// Check for spam keywords
 	for _, keyword := range spamKeywords {
 		if strings.Contains(lowerMsg, keyword) {
@@ -302,7 +330,7 @@ func isSpamPattern(message string, userEmail string) bool {
 			return true
 		}
 	}
-	
+
 	// Check for excessive capitalization (more than 70% caps)
 	if len(message) > 10 {
 		capsCount := 0
@@ -320,7 +348,7 @@ func isSpamPattern(message string, userEmail string) bool {
 			return true
 		}
 	}
-	
+
 	// Check for excessive repetition of characters
 	if len(message) > 5 {
 		for i := 0; i < len(message)-4; i++ {
@@ -341,7 +369,7 @@ func isSpamPattern(message string, userEmail string) bool {
 			}
 		}
 	}
-	
+
 	// Check for excessive emojis (more than 30% of message)
 	emojiCount := 0
 	runeCount := 0
@@ -349,10 +377,10 @@ func isSpamPattern(message string, userEmail string) bool {
 		runeCount++
 		// Simple emoji detection (Unicode ranges)
 		if (r >= 0x1F600 && r <= 0x1F64F) || // Emoticons
-		   (r >= 0x1F300 && r <= 0x1F5FF) || // Misc symbols
-		   (r >= 0x1F680 && r <= 0x1F6FF) || // Transport
-		   (r >= 0x2600 && r <= 0x26FF) ||   // Misc symbols
-		   (r >= 0x2700 && r <= 0x27BF) {    // Dingbats
+			(r >= 0x1F300 && r <= 0x1F5FF) || // Misc symbols
+			(r >= 0x1F680 && r <= 0x1F6FF) || // Transport
+			(r >= 0x2600 && r <= 0x26FF) || // Misc symbols
+			(r >= 0x2700 && r <= 0x27BF) { // Dingbats
 			emojiCount++
 		}
 	}
@@ -360,7 +388,7 @@ func isSpamPattern(message string, userEmail string) bool {
 		fmt.Printf("WARNING: Excessive emojis detected in message from %s\n", userEmail)
 		return true
 	}
-	
+
 	return false
 }
 
@@ -368,19 +396,19 @@ func sendCallback(callbackURL, queueID, status string, messageID interface{}) {
 	if callbackURL == "" {
 		return
 	}
-	
+
 	payload := map[string]interface{}{
 		"queue_id": queueID,
 		"status":   status,
 		"sent_at":  time.Now().UTC().Format(time.RFC3339),
 	}
-	
+
 	if messageID != nil {
 		payload["message_id"] = messageID
 	}
-	
+
 	payloadBytes, _ := json.Marshal(payload)
-	
+
 	go func() {
 		resp, err := http.Post(callbackURL, "application/json", bytes.NewBuffer(payloadBytes))
 		if err != nil {
@@ -388,7 +416,7 @@ func sendCallback(callbackURL, queueID, status string, messageID interface{}) {
 			return
 		}
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			fmt.Printf("SUCCESS: Callback sent to %s for queue %s\n", callbackURL, queueID)
 		} else {
@@ -405,19 +433,19 @@ func (q *MessageQueue) processQueue() {
 		q.IsProcessing = false
 		q.mu.Unlock()
 	}()
-	
+
 	for {
 		q.mu.Lock()
 		if len(q.Messages) == 0 {
 			q.mu.Unlock()
 			break
 		}
-		
+
 		// Get the next message
 		msg := q.Messages[0]
 		q.Messages = q.Messages[1:]
 		q.mu.Unlock()
-		
+
 		// Check if we can send (rate limiting)
 		if !q.canSendMessage() {
 			// Put message back at front and wait
@@ -427,11 +455,11 @@ func (q *MessageQueue) processQueue() {
 			time.Sleep(time.Minute) // Wait a minute before retrying
 			continue
 		}
-		
+
 		// Apply rate limiting delays
 		q.mu.Lock()
 		now := time.Now()
-		
+
 		// Check if we need burst cooldown
 		if q.BurstCount >= BURST_ALLOWANCE {
 			timeSinceLastBurst := now.Sub(q.LastSent)
@@ -446,7 +474,7 @@ func (q *MessageQueue) processQueue() {
 				q.BurstCount = 0 // Reset if enough time has passed
 			}
 		}
-		
+
 		// Apply normal message delay
 		if !q.LastSent.IsZero() {
 			timeSinceLastMessage := now.Sub(q.LastSent)
@@ -457,12 +485,12 @@ func (q *MessageQueue) processQueue() {
 				q.mu.Lock()
 			}
 		}
-		
+
 		q.mu.Unlock()
-		
+
 		// Send the message
 		success := q.sendMessage(msg)
-		
+
 		q.mu.Lock()
 		if success {
 			q.LastSent = time.Now()
@@ -485,7 +513,7 @@ func (q *MessageQueue) processQueue() {
 			}
 		}
 		q.mu.Unlock()
-		
+
 		// Random delay between messages to appear more human
 		addHumanDelay()
 	}
@@ -497,22 +525,22 @@ func (q *MessageQueue) sendMessage(msg *QueuedMessage) bool {
 	state.mu.RLock()
 	client := state.waClient
 	state.mu.RUnlock()
-	
+
 	if client == nil {
 		fmt.Printf("ERROR: WhatsApp client not connected for user %s\n", msg.UserEmail)
 		return false
 	}
-	
+
 	// Parse chat JID
 	chatJID, err := types.ParseJID(msg.ChatJID)
 	if err != nil {
 		fmt.Printf("ERROR: Invalid chat JID %s: %v\n", msg.ChatJID, err)
 		return false
 	}
-	
+
 	// Anti-detection: simulate human behavior
 	simulateTyping(client, chatJID, msg.Message)
-	
+
 	// Send the message
 	msgID, err := client.SendMessage(context.Background(), chatJID, &waProto.Message{
 		Conversation: &msg.Message,
@@ -521,10 +549,10 @@ func (q *MessageQueue) sendMessage(msg *QueuedMessage) bool {
 		fmt.Printf("ERROR: Failed to send message %s: %v\n", msg.ID, err)
 		return false
 	}
-	
+
 	// Send success callback
 	sendCallback(msg.CallbackURL, msg.ID, "sent", msgID)
-	
+
 	return true
 }
 
@@ -600,8 +628,8 @@ func forwardToWebhooks(email string, payload map[string]interface{}, mediaPath s
 	fmt.Printf("DEBUG: [FORWARD] userID: %d\n", userID)
 
 	// Extract message info for filtering and chat tracking
-	fromJID, _ := payload["from"].(string)     // Individual sender
-	chatJID, _ := payload["to"].(string)       // Chat/Group where message was sent
+	fromJID, _ := payload["from"].(string) // Individual sender
+	chatJID, _ := payload["to"].(string)   // Chat/Group where message was sent
 	fromName, _ := payload["name"].(string)
 	fmt.Printf("DEBUG: Message from JID: %s, in Chat: %s, Name: %s\n", fromJID, chatJID, fromName)
 
@@ -773,6 +801,7 @@ func initDB(dbPath string) error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		email TEXT UNIQUE NOT NULL,
 		password_hash TEXT NOT NULL,
+		api_key TEXT UNIQUE,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	)`)
 	if err != nil {
@@ -824,6 +853,7 @@ func startMediaCleanup(mediaDir string) {
 
 // Refactor startServer to accept a *http.ServeMux argument and register all handlers on it
 func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, waSessionPrefix string) {
+	fmt.Printf("DEBUG: Starting server with API key middleware enabled\n")
 	if err := initDB(dbPath); err != nil {
 		panic("Failed to initialize DB: " + err.Error())
 	}
@@ -1004,18 +1034,10 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 	})
 
 	// --- API: List Webhooks ---
-	mux.HandleFunc("/api/webhooks", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r, sessionCookieName) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		email := getUserEmail(r, sessionCookieName)
-		userID, err := getUserIDByEmail(email)
-		if err != nil {
-			fmt.Println("ERROR: Could not get user ID for email", email, err)
-			http.Error(w, "Failed to get user ID", http.StatusInternalServerError)
-			return
-		}
+	mux.HandleFunc("/api/webhooks", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from context (set by requireAPIKey middleware)
+		userID := r.Context().Value("userID").(int64)
+
 		webhooks, err := dbListWebhooks(userID)
 		if err != nil {
 			fmt.Println("ERROR: Could not list webhooks for user", userID, err)
@@ -1027,16 +1049,16 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(webhooks)
-	})
+	}))
 
 	// --- API: Create Webhook ---
-	mux.HandleFunc("/api/webhooks/create", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/webhooks/create", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("DEBUG: /api/webhooks/create called")
-		if !isAuthenticated(r, sessionCookieName) {
-			fmt.Println("DEBUG: Not authenticated for webhook creation")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+
+		// Get user ID from context (set by requireAPIKey middleware)
+		userID := r.Context().Value("userID").(int64)
+		email := getUserEmailByID(userID)
+
 		var req struct {
 			URL         string `json:"url"`
 			Method      string `json:"method"`
@@ -1069,13 +1091,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		if req.FilterType == "" {
 			req.FilterType = "all"
 		}
-		email := getUserEmail(r, sessionCookieName)
-		userID, err := getUserIDByEmail(email)
-		if err != nil {
-			fmt.Println("ERROR: Could not get user ID for email", email, err)
-			http.Error(w, "Failed to get user ID", http.StatusInternalServerError)
-			return
-		}
+
 		fmt.Printf("DEBUG: [CREATE] user email: %s, userID: %d\n", email, userID)
 		fmt.Printf("DEBUG: Creating webhook for %s: URL=%s, Method=%s, FilterType=%s, FilterValue=%s\n",
 			email, req.URL, req.Method, req.FilterType, req.FilterValue)
@@ -1088,7 +1104,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			FilterValue: req.FilterValue,
 			CreatedAt:   time.Now(),
 		}
-		err = dbCreateWebhook(userID, wh)
+		err := dbCreateWebhook(userID, wh)
 		if err != nil {
 			fmt.Println("ERROR: Could not create webhook in DB", err)
 			http.Error(w, "Failed to create webhook", http.StatusInternalServerError)
@@ -1103,14 +1119,13 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			"filter_type":  req.FilterType,
 			"filter_value": req.FilterValue,
 		})
-	})
+	}))
 
 	// --- API: Delete Webhook ---
-	mux.HandleFunc("/api/webhooks/delete", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r, sessionCookieName) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	mux.HandleFunc("/api/webhooks/delete", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
+		// Get user ID from context (set by requireAPIKey middleware)
+		userID := r.Context().Value("userID").(int64)
+
 		var req struct {
 			ID string `json:"id"`
 		}
@@ -1118,14 +1133,8 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
-		email := getUserEmail(r, sessionCookieName)
-		userID, err := getUserIDByEmail(email)
-		if err != nil {
-			fmt.Println("ERROR: Could not get user ID for email", email, err)
-			http.Error(w, "Failed to get user ID", http.StatusInternalServerError)
-			return
-		}
-		err = dbDeleteWebhook(userID, req.ID)
+
+		err := dbDeleteWebhook(userID, req.ID)
 		if err != nil {
 			fmt.Println("ERROR: Could not delete webhook in DB", err)
 			http.Error(w, "Failed to delete webhook", http.StatusInternalServerError)
@@ -1133,14 +1142,10 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"success":true}`))
-	})
+	}))
 
 	// --- API: Webhook Logs ---
-	mux.HandleFunc("/api/webhooks/logs", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r, sessionCookieName) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	mux.HandleFunc("/api/webhooks/logs", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("id")
 		if id == "" {
 			http.Error(w, "Missing id", http.StatusBadRequest)
@@ -1149,6 +1154,51 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		logs := getWebhookLogs(id)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(logs)
+	}))
+
+	// --- API: Get User's API Key ---
+	mux.HandleFunc("/api/user/api-key", func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticated(r, sessionCookieName) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method == "GET" {
+			email := getUserEmail(r, sessionCookieName)
+			userID, err := getUserIDByEmail(email)
+			if err != nil {
+				http.Error(w, "Failed to get user ID", http.StatusInternalServerError)
+				return
+			}
+
+			apiKey, err := getUserAPIKey(userID)
+			if err != nil {
+				http.Error(w, "Failed to get API key", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"api_key": apiKey})
+		} else if r.Method == "POST" {
+			// Regenerate API key
+			email := getUserEmail(r, sessionCookieName)
+			userID, err := getUserIDByEmail(email)
+			if err != nil {
+				http.Error(w, "Failed to get user ID", http.StatusInternalServerError)
+				return
+			}
+
+			newAPIKey, err := regenerateAPIKey(userID)
+			if err != nil {
+				http.Error(w, "Failed to regenerate API key", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"api_key": newAPIKey})
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 
 	// --- API: Generate Automation URL ---
@@ -1197,7 +1247,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		automationURL := fmt.Sprintf("%s/webhook/%s", baseURL, webhook.ID)
 
 		fmt.Printf("SUCCESS: Generated automation URL for user %s: %s\n", email, automationURL)
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
@@ -1215,27 +1265,27 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 
 		email := getUserEmail(r, sessionCookieName)
-		
+
 		// Get queue for this user
 		queueMutex.RLock()
 		queue, exists := messageQueues[email]
 		queueMutex.RUnlock()
-		
+
 		if !exists {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"queue_length":    0,
-				"messages":        []interface{}{},
-				"hourly_count":    0,
-				"daily_count":     0,
-				"hourly_limit":    MAX_HOURLY_MESSAGES,
-				"daily_limit":     MAX_DAILY_MESSAGES,
+				"queue_length": 0,
+				"messages":     []interface{}{},
+				"hourly_count": 0,
+				"daily_count":  0,
+				"hourly_limit": MAX_HOURLY_MESSAGES,
+				"daily_limit":  MAX_DAILY_MESSAGES,
 			})
 			return
 		}
 
 		queue.mu.RLock()
-		
+
 		// Prepare queue status
 		messages := make([]map[string]interface{}, len(queue.Messages))
 		for i, msg := range queue.Messages {
@@ -1249,7 +1299,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 				"position":   i + 1,
 			}
 		}
-		
+
 		response := map[string]interface{}{
 			"queue_length":     len(queue.Messages),
 			"messages":         messages,
@@ -1262,7 +1312,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			"is_processing":    queue.IsProcessing,
 			"last_sent":        queue.LastSent,
 		}
-		
+
 		queue.mu.RUnlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1283,12 +1333,12 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		}
 
 		email := getUserEmail(r, sessionCookieName)
-		
+
 		// Get queue for this user
 		queueMutex.RLock()
 		queue, exists := messageQueues[email]
 		queueMutex.RUnlock()
-		
+
 		if !exists {
 			http.Error(w, "Queue not found", http.StatusNotFound)
 			return
@@ -1296,27 +1346,27 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 
 		queue.mu.RLock()
 		defer queue.mu.RUnlock()
-		
+
 		// Find the message
 		for i, msg := range queue.Messages {
 			if msg.ID == messageID {
 				response := map[string]interface{}{
-					"id":         msg.ID,
-					"chat_jid":   msg.ChatJID,
-					"message":    msg.Message,
-					"status":     msg.Status,
-					"created_at": msg.CreatedAt,
-					"retries":    msg.Retries,
-					"position":   i + 1,
+					"id":              msg.ID,
+					"chat_jid":        msg.ChatJID,
+					"message":         msg.Message,
+					"status":          msg.Status,
+					"created_at":      msg.CreatedAt,
+					"retries":         msg.Retries,
+					"position":        i + 1,
 					"estimated_delay": queue.estimateDelay(i + 1).Seconds(),
 				}
-				
+
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(response)
 				return
 			}
 		}
-		
+
 		http.Error(w, "Message not found in queue", http.StatusNotFound)
 	})
 
@@ -1358,7 +1408,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 						if name == "" {
 							name = jid.User // Use phone number as fallback
 						}
-						
+
 						allChats = append(allChats, Chat{
 							ID:   jid.String(),
 							Name: name,
@@ -1379,7 +1429,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 					if groupName == "" {
 						groupName = "Unnamed Group"
 					}
-					
+
 					allChats = append(allChats, Chat{
 						ID:   group.JID.String(),
 						Name: groupName,
@@ -1491,11 +1541,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 	})
 
 	// --- API: Send Message (with Queue System) ---
-	mux.HandleFunc("/api/messages/send", func(w http.ResponseWriter, r *http.Request) {
-		if !isAuthenticated(r, sessionCookieName) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	mux.HandleFunc("/api/messages/send", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
 
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1518,15 +1564,17 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			return
 		}
 
-		email := getUserEmail(r, sessionCookieName)
-		
+		// Get user ID from context (set by requireAPIKey middleware)
+		userID := r.Context().Value("userID").(int64)
+		email := getUserEmailByID(userID)
+
 		// Check for spam patterns
 		if isSpamPattern(req.Message, email) {
 			fmt.Printf("WARNING: Blocked potential spam message from %s\n", email)
 			http.Error(w, "Message blocked: potential spam detected", http.StatusBadRequest)
 			return
 		}
-		
+
 		// Check if WhatsApp is connected
 		state := getUserWAState(email)
 		state.mu.RLock()
@@ -1547,7 +1595,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 
 		// Get or create queue for this user
 		queue := getOrCreateQueue(email)
-		
+
 		// Check if queue can accept messages
 		if !queue.canSendMessage() {
 			http.Error(w, "Daily or hourly message limit reached", http.StatusTooManyRequests)
@@ -1584,7 +1632,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 		estimatedDelay := queue.estimateDelay(position)
 
 		fmt.Printf("SUCCESS: Queued message %s for user %s (position: %d)\n", queuedMsg.ID, email, position)
-		
+
 		// Return immediate response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1595,7 +1643,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 			"estimated_delay": fmt.Sprintf("%.0f seconds", estimatedDelay.Seconds()),
 			"message":         "Message queued successfully",
 		})
-	})
+	}))
 
 	// --- Serve media files ---
 	mux.HandleFunc("/media/", func(w http.ResponseWriter, r *http.Request) {
@@ -1702,7 +1750,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 
 					// Get or create queue for this user
 					queue := getOrCreateQueue(userEmail)
-					
+
 					// Check if queue can accept messages
 					if !queue.canSendMessage() {
 						http.Error(w, "Daily or hourly message limit reached for this user", http.StatusTooManyRequests)
@@ -1738,7 +1786,7 @@ func startServer(mux *http.ServeMux, port, sessionCookieName, dbPath, mediaDir, 
 					estimatedDelay := queue.estimateDelay(position)
 
 					fmt.Printf("SUCCESS: Queued webhook message %s for user %s (position: %d)\n", queuedMsg.ID, userEmail, position)
-					
+
 					// Return immediate queue response
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2124,6 +2172,64 @@ func dbListWebhooks(userID int64) ([]Webhook, error) {
 func dbDeleteWebhook(userID int64, webhookID string) error {
 	_, err := db.Exec(`DELETE FROM webhooks WHERE user_id = ? AND id = ?`, userID, webhookID)
 	return err
+}
+
+// Generate a secure API key
+func generateAPIKey() string {
+	bytes := make([]byte, 16)
+	rand.Read(bytes)
+	return "sk_" + hex.EncodeToString(bytes)
+}
+
+// Get user ID by API key
+func getUserIDByAPIKey(apiKey string) int64 {
+	var userID int64
+	fmt.Printf("DEBUG: Looking up API key in database: '%s'\n", apiKey)
+	err := db.QueryRow(`SELECT id FROM users WHERE api_key = ?`, apiKey).Scan(&userID)
+	if err != nil {
+		fmt.Printf("DEBUG: Database query error for API key '%s': %v\n", apiKey, err)
+		return 0 // Invalid API key
+	}
+	fmt.Printf("DEBUG: Found user ID %d for API key '%s'\n", userID, apiKey)
+	return userID
+}
+
+// Get user's email by ID
+func getUserEmailByID(userID int64) string {
+	var email string
+	err := db.QueryRow(`SELECT email FROM users WHERE id = ?`, userID).Scan(&email)
+	if err != nil {
+		return "" // User not found
+	}
+	return email
+}
+
+// Get user's API key
+func getUserAPIKey(userID int64) (string, error) {
+	var apiKey string
+	err := db.QueryRow(`SELECT api_key FROM users WHERE id = ?`, userID).Scan(&apiKey)
+	if err != nil {
+		return "", err
+	}
+	// Generate API key if user doesn't have one
+	if apiKey == "" {
+		apiKey = generateAPIKey()
+		_, err = db.Exec(`UPDATE users SET api_key = ? WHERE id = ?`, apiKey, userID)
+		if err != nil {
+			return "", err
+		}
+	}
+	return apiKey, nil
+}
+
+// Regenerate user's API key
+func regenerateAPIKey(userID int64) (string, error) {
+	newAPIKey := generateAPIKey()
+	_, err := db.Exec(`UPDATE users SET api_key = ? WHERE id = ?`, newAPIKey, userID)
+	if err != nil {
+		return "", err
+	}
+	return newAPIKey, nil
 }
 
 // Get webhook owner by webhook ID

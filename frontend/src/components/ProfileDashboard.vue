@@ -68,6 +68,97 @@
         </div>
       </section>
 
+      <!-- API Key Management Section -->
+      <section class="api-key-section">
+        <div class="api-key-card">
+          <div class="api-key-header">
+            <h3>🔑 API Key Management</h3>
+            <p class="api-key-description">Use your API key to access webhooks and send messages programmatically</p>
+          </div>
+          
+          <div v-if="apiKeyLoading" class="loading">Loading API key...</div>
+          
+          <div v-else-if="userAPIKey" class="api-key-content">
+            <div class="api-key-display">
+              <label class="api-key-label">Your API Key:</label>
+              <div class="api-key-warning">
+                ⚠️ <strong>Important:</strong> Regenerating this key will immediately invalidate the current key and break existing integrations.
+              </div>
+              <div class="api-key-wrapper">
+                <code class="api-key-code" :class="{ 'api-key-hidden': hideAPIKey }">
+                  {{ hideAPIKey ? '•'.repeat(32) : userAPIKey }}
+                </code>
+                <div class="api-key-actions">
+                  <button @click="toggleAPIKeyVisibility" class="toggle-visibility-btn" :title="hideAPIKey ? 'Show API Key' : 'Hide API Key'">
+                    {{ hideAPIKey ? '👁️' : '🙈' }}
+                  </button>
+                  <button @click="copyAPIKey" class="copy-api-key-btn" title="Copy API Key">📋</button>
+                  <button @click="regenerateAPIKey" class="regenerate-btn" title="Generate New Key" :disabled="regenerating">
+                    {{ regenerating ? '⏳' : '🔄' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+            
+            <div class="api-key-usage">
+              <div class="usage-title">💡 Usage Examples:</div>
+              <div class="usage-examples">
+                <div class="usage-example">
+                  <div class="usage-example-title">📨 Send Message:</div>
+                  <pre class="usage-code">curl -X POST "{{ baseURL }}/api/messages/send" \
+  -H "X-API-Key: {{ userAPIKey }}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "chat_jid": "1234567890@s.whatsapp.net",
+    "message": "Hello from API!"
+  }'</pre>
+                  <button @click="copyUsageCode('send')" class="copy-usage-btn">📋 Copy</button>
+                </div>
+                
+                <div class="usage-example">
+                  <div class="usage-example-title">🔗 List Webhooks:</div>
+                  <pre class="usage-code">curl -X GET "{{ baseURL }}/api/webhooks" \
+  -H "X-API-Key: {{ userAPIKey }}"</pre>
+                  <button @click="copyUsageCode('list')" class="copy-usage-btn">📋 Copy</button>
+                </div>
+              </div>
+              
+              <div class="n8n-config">
+                <div class="usage-title">🔧 n8n HTTP Node Configuration:</div>
+                <div class="config-box">
+                  <div class="config-item">
+                    <span class="config-label">Authentication Type:</span>
+                    <span class="config-value">Header Auth</span>
+                  </div>
+                  <div class="config-item">
+                    <span class="config-label">Header Name:</span>
+                    <span class="config-value">X-API-Key</span>
+                    <button @click="copyToClipboard('X-API-Key')" class="copy-small-btn">📋</button>
+                  </div>
+                  <div class="config-item">
+                    <span class="config-label">Header Value:</span>
+                    <span class="config-value">{{ userAPIKey }}</span>
+                    <button @click="copyAPIKey" class="copy-small-btn">📋</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div v-else-if="!apiKeyLoading" class="api-key-generate">
+            <p>No API key found. Generate one to start using the API.</p>
+            <button @click="generateAPIKey" class="generate-api-key-btn" :disabled="generating">
+              <span v-if="generating">⏳ Generating...</span>
+              <span v-else>🔑 Generate API Key</span>
+            </button>
+          </div>
+          
+          <div v-if="apiKeyError" class="error-message">
+            ❌ {{ apiKeyError }}
+          </div>
+        </div>
+      </section>
+
       <section class="webhooks-section">
         <div class="webhooks-header">
           <h2>Webhook Forwarding (Optional)</h2>
@@ -211,12 +302,19 @@ export default {
       cacheTimestampKey: 'whatsapp_chats_timestamp',
       // Automation URLs
       automationURLs: [],
-      generating: false
+      generating: false,
+      // API Key Management
+      userAPIKey: '',
+      apiKeyLoading: false,
+      apiKeyError: '',
+      hideAPIKey: true,
+      regenerating: false
     };
   },
   mounted() {
     this.fetchWebhooks();
     this.loadAutomationURLs();
+    this.fetchAPIKey();
     this.logsInterval = setInterval(this.fetchAllLogs, 5000);
     this.fetchWAStatus();
     this.waPollInterval = setInterval(this.fetchWAStatus, 2000);
@@ -225,12 +323,27 @@ export default {
     clearInterval(this.logsInterval);
     clearInterval(this.waPollInterval);
   },
+  computed: {
+    baseURL() {
+      return window.location.origin;
+    }
+  },
   methods: {
     async fetchWebhooks() {
       this.loading = true;
       this.error = "";
       try {
-        const res = await fetch("/api/webhooks");
+        if (!this.userAPIKey) {
+          await this.fetchAPIKey();
+          if (!this.userAPIKey) {
+            throw new Error("No API key available. Please generate one first.");
+          }
+        }
+        const res = await fetch("/api/webhooks", {
+          headers: {
+            "X-API-Key": this.userAPIKey
+          }
+        });
         if (!res.ok) throw new Error("Failed to load webhooks");
         this.webhooks = await res.json();
         this.loadAutomationURLs(); // Load automation URLs after fetching webhooks
@@ -244,9 +357,18 @@ export default {
     async createWebhook() {
       this.error = "";
       try {
+        if (!this.userAPIKey) {
+          await this.fetchAPIKey();
+          if (!this.userAPIKey) {
+            throw new Error("No API key available. Please generate one first.");
+          }
+        }
         const res = await fetch("/api/webhooks/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "X-API-Key": this.userAPIKey
+          },
           body: JSON.stringify({ 
             method: this.newMethod, 
             url: this.newURL, 
@@ -263,9 +385,18 @@ export default {
     async deleteWebhook(id) {
       this.error = "";
       try {
+        if (!this.userAPIKey) {
+          await this.fetchAPIKey();
+          if (!this.userAPIKey) {
+            throw new Error("No API key available. Please generate one first.");
+          }
+        }
         const res = await fetch("/api/webhooks/delete", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "X-API-Key": this.userAPIKey
+          },
           body: JSON.stringify({ id })
         });
         if (!res.ok) throw new Error("Failed to delete webhook");
@@ -278,9 +409,20 @@ export default {
       return window.location.origin + "/webhook/" + id;
     },
     async fetchAllLogs() {
+      if (!this.userAPIKey) {
+        await this.fetchAPIKey();
+        if (!this.userAPIKey) {
+          console.error("No API key available for fetching logs");
+          return;
+        }
+      }
       for (const wh of this.webhooks) {
         try {
-          const res = await fetch(`/api/webhooks/logs?id=${wh.id}`);
+          const res = await fetch(`/api/webhooks/logs?id=${wh.id}`, {
+            headers: {
+              "X-API-Key": this.userAPIKey
+            }
+          });
           if (res.ok) {
             const logs = await res.json();
             // Format payload as pretty JSON string
@@ -597,6 +739,122 @@ export default {
         this.error = e.message;
         console.error('Error deleting automation URL:', e);
       }
+    },
+
+    // API Key Management Methods
+    async fetchAPIKey() {
+      this.apiKeyLoading = true;
+      this.apiKeyError = '';
+      try {
+        const res = await fetch('/api/user/api-key', {
+          method: 'GET',
+          credentials: 'include'
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          this.userAPIKey = data.api_key;
+        } else if (res.status === 500) {
+          // No API key exists yet, that's okay
+          this.userAPIKey = '';
+        } else {
+          throw new Error('Failed to fetch API key');
+        }
+      } catch (e) {
+        this.apiKeyError = `Failed to load API key: ${e.message}`;
+        console.error('Error fetching API key:', e);
+      } finally {
+        this.apiKeyLoading = false;
+      }
+    },
+
+    async generateAPIKey() {
+      this.generating = true;
+      this.apiKeyError = '';
+      try {
+        const res = await fetch('/api/user/api-key', {
+          method: 'POST',
+          credentials: 'include'
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          this.userAPIKey = data.api_key;
+          this.hideAPIKey = false; // Show the new key
+        } else {
+          throw new Error('Failed to generate API key');
+        }
+      } catch (e) {
+        this.apiKeyError = `Failed to generate API key: ${e.message}`;
+        console.error('Error generating API key:', e);
+      } finally {
+        this.generating = false;
+      }
+    },
+
+    async regenerateAPIKey() {
+      const confirmMessage = `⚠️ IMPORTANT: Regenerating your API key will immediately invalidate your current key.
+
+❌ All existing integrations will stop working:
+• External tools (n8n, Zapier, etc.)
+• Custom scripts and automations
+• CI/CD pipelines
+• Third-party applications
+
+You'll need to update all systems with the new key.
+
+Are you sure you want to continue?`;
+      
+      if (!confirm(confirmMessage)) {
+        return;
+      }
+      
+      this.regenerating = true;
+      this.apiKeyError = '';
+      try {
+        const res = await fetch('/api/user/api-key', {
+          method: 'POST',
+          credentials: 'include'
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          this.userAPIKey = data.api_key;
+          this.hideAPIKey = false; // Show the new key
+        } else {
+          throw new Error('Failed to regenerate API key');
+        }
+      } catch (e) {
+        this.apiKeyError = `Failed to regenerate API key: ${e.message}`;
+        console.error('Error regenerating API key:', e);
+      } finally {
+        this.regenerating = false;
+      }
+    },
+
+    toggleAPIKeyVisibility() {
+      this.hideAPIKey = !this.hideAPIKey;
+    },
+
+    copyAPIKey() {
+      this.copyToClipboard(this.userAPIKey);
+    },
+
+    copyUsageCode(type) {
+      let code = '';
+      if (type === 'send') {
+        code = `curl -X POST "${this.baseURL}/api/messages/send" \\
+  -H "X-API-Key: ${this.userAPIKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "chat_jid": "1234567890@s.whatsapp.net",
+    "message": "Hello from API!"
+  }'`;
+      } else if (type === 'list') {
+        code = `curl -X GET "${this.baseURL}/api/webhooks" \\
+  -H "X-API-Key: ${this.userAPIKey}"`;
+      }
+      this.copyToClipboard(code);
     }
   }
 };
@@ -611,6 +869,7 @@ body, .profile-dashboard {
   margin: 0;
 }
 .profile-dashboard {
+  grid-column: span 2 / span 2;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -917,6 +1176,268 @@ main {
 .copy-example-btn:hover {
   background: #2d3748;
 }
+
+/* API Key Management Styles */
+.api-key-section {
+  width: 100%;
+  max-width: 1400px;
+  margin-top: 2rem;
+}
+
+.api-key-card {
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 2px 12px #0001;
+  padding: 2rem;
+  border: 1px solid #e0e0e0;
+  border-left: 4px solid #1976d2;
+}
+
+.api-key-header h3 {
+  margin: 0 0 0.5rem 0;
+  color: #333;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.api-key-description {
+  color: #666;
+  margin-bottom: 1.5rem;
+  line-height: 1.5;
+}
+
+.api-key-display {
+  margin-bottom: 2rem;
+}
+
+.api-key-label {
+  display: block;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 0.5rem;
+}
+
+.api-key-warning {
+  background: #fff3e0;
+  border: 1px solid #ff9800;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  color: #f57c00;
+  line-height: 1.4;
+}
+
+.api-key-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.api-key-code {
+  flex: 1;
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1rem;
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+  color: #333;
+  word-break: break-all;
+  min-width: 300px;
+  transition: all 0.3s;
+}
+
+.api-key-code.api-key-hidden {
+  font-family: Arial, sans-serif;
+  letter-spacing: 2px;
+}
+
+.api-key-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.toggle-visibility-btn,
+.copy-api-key-btn,
+.regenerate-btn {
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 0.75rem;
+  cursor: pointer;
+  transition: all 0.3s;
+  font-size: 1rem;
+  min-width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toggle-visibility-btn:hover,
+.copy-api-key-btn:hover {
+  background: #e0e0e0;
+}
+
+.regenerate-btn {
+  background: #fff3e0;
+  border-color: #ff9800;
+  color: #f57c00;
+}
+
+.regenerate-btn:hover:not(:disabled) {
+  background: #ff9800;
+  color: white;
+}
+
+.regenerate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.api-key-usage {
+  border-top: 1px solid #e0e0e0;
+  padding-top: 1.5rem;
+}
+
+.usage-title {
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+}
+
+.usage-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.usage-example {
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.usage-example-title {
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 0.5rem;
+}
+
+.usage-code {
+  background: #2d3748;
+  color: #e2e8f0;
+  padding: 1rem;
+  border-radius: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0 0 1rem 0;
+  line-height: 1.4;
+}
+
+.copy-usage-btn {
+  background: #4a5568;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  transition: background 0.3s;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.copy-usage-btn:hover {
+  background: #2d3748;
+}
+.n8n-config {
+  border-top: 1px solid #e0e0e0;
+  padding-top: 1.5rem;
+  margin-top: 1.5rem;
+}
+.config-box {
+  background: #f8f9fa;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1rem;
+}
+.config-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+.config-item:last-child {
+  border-bottom: none;
+}
+.config-label {
+  font-weight: 600;
+  color: #555;
+  min-width: 150px;
+}
+.config-value {
+  font-family: 'Courier New', monospace;
+  background: #e2e8f0;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  flex: 1;
+  margin: 0 0.5rem;
+  word-break: break-all;
+}
+.copy-small-btn {
+  background: #4a5568;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: background 0.3s;
+}
+.copy-small-btn:hover {
+  background: #2d3748;
+}
+
+.api-key-generate {
+  text-align: center;
+  padding: 2rem;
+}
+
+.generate-api-key-btn {
+  background: #1976d2;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 1rem 2rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+  box-shadow: 0 2px 8px rgba(25, 118, 210, 0.2);
+}
+
+.generate-api-key-btn:hover:not(:disabled) {
+  background: #1565c0;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(25, 118, 210, 0.3);
+}
+
+.generate-api-key-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .webhooks-header {
   display: flex;
   justify-content: space-between;

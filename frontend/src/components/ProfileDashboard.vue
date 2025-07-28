@@ -68,96 +68,6 @@
         </div>
       </section>
 
-      <!-- API Key Management Section -->
-      <section class="api-key-section">
-        <div class="api-key-card">
-          <div class="api-key-header">
-            <h3>🔑 API Key Management</h3>
-            <p class="api-key-description">Use your API key to access webhooks and send messages programmatically</p>
-          </div>
-          
-          <div v-if="apiKeyLoading" class="loading">Loading API key...</div>
-          
-          <div v-else-if="userAPIKey" class="api-key-content">
-            <div class="api-key-display">
-              <label class="api-key-label">Your API Key:</label>
-              <div class="api-key-warning">
-                ⚠️ <strong>Important:</strong> Regenerating this key will immediately invalidate the current key and break existing integrations.
-              </div>
-              <div class="api-key-wrapper">
-                <code class="api-key-code" :class="{ 'api-key-hidden': hideAPIKey }">
-                  {{ hideAPIKey ? '•'.repeat(32) : userAPIKey }}
-                </code>
-                <div class="api-key-actions">
-                  <button @click="toggleAPIKeyVisibility" class="toggle-visibility-btn" :title="hideAPIKey ? 'Show API Key' : 'Hide API Key'">
-                    {{ hideAPIKey ? '👁️' : '🙈' }}
-                  </button>
-                  <button @click="copyAPIKey" class="copy-api-key-btn" title="Copy API Key">📋</button>
-                  <button @click="regenerateAPIKey" class="regenerate-btn" title="Generate New Key" :disabled="regenerating">
-                    {{ regenerating ? '⏳' : '🔄' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-            
-            <div class="api-key-usage">
-              <div class="usage-title">💡 Usage Examples:</div>
-              <div class="usage-examples">
-                <div class="usage-example">
-                  <div class="usage-example-title">📨 Send Message:</div>
-                  <pre class="usage-code">curl -X POST "{{ baseURL }}/api/messages/send" \
-  -H "X-API-Key: {{ userAPIKey }}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "chat_jid": "1234567890@s.whatsapp.net",
-    "message": "Hello from API!"
-  }'</pre>
-                  <button @click="copyUsageCode('send')" class="copy-usage-btn">📋 Copy</button>
-                </div>
-                
-                <div class="usage-example">
-                  <div class="usage-example-title">🔗 List Webhooks:</div>
-                  <pre class="usage-code">curl -X GET "{{ baseURL }}/api/webhooks" \
-  -H "X-API-Key: {{ userAPIKey }}"</pre>
-                  <button @click="copyUsageCode('list')" class="copy-usage-btn">📋 Copy</button>
-                </div>
-              </div>
-              
-              <div class="n8n-config">
-                <div class="usage-title">🔧 n8n HTTP Node Configuration:</div>
-                <div class="config-box">
-                  <div class="config-item">
-                    <span class="config-label">Authentication Type:</span>
-                    <span class="config-value">Header Auth</span>
-                  </div>
-                  <div class="config-item">
-                    <span class="config-label">Header Name:</span>
-                    <span class="config-value">X-API-Key</span>
-                    <button @click="copyToClipboard('X-API-Key')" class="copy-small-btn">📋</button>
-                  </div>
-                  <div class="config-item">
-                    <span class="config-label">Header Value:</span>
-                    <span class="config-value">{{ userAPIKey }}</span>
-                    <button @click="copyAPIKey" class="copy-small-btn">📋</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <div v-else-if="!apiKeyLoading" class="api-key-generate">
-            <p>No API key found. Generate one to start using the API.</p>
-            <button @click="generateAPIKey" class="generate-api-key-btn" :disabled="generating">
-              <span v-if="generating">⏳ Generating...</span>
-              <span v-else>🔑 Generate API Key</span>
-            </button>
-          </div>
-          
-          <div v-if="apiKeyError" class="error-message">
-            ❌ {{ apiKeyError }}
-          </div>
-        </div>
-      </section>
 
       <section class="webhooks-section">
         <div class="webhooks-header">
@@ -262,6 +172,109 @@
         <MessageSender />
       </section>
 
+      <!-- Developer/Advanced Section -->
+      <section class="developer-section">
+        <div class="developer-header" @click="showAdvancedSection = !showAdvancedSection">
+          <h2>
+            {{ showAdvancedSection ? '🔽' : '▶️' }} Advanced / Developer Options
+          </h2>
+          <p class="developer-description">
+            API keys, direct integrations, and advanced features for developers
+          </p>
+        </div>
+        
+        <div v-show="showAdvancedSection" class="developer-content">
+          <!-- API Key Management -->
+          <div class="api-key-card">
+            <div class="api-key-header">
+              <h3>🔑 API Key Management</h3>
+              <p class="api-key-description">Use your API key to access webhooks and send messages programmatically</p>
+            </div>
+            
+            <div v-if="apiKeyLoading" class="loading">Loading API key...</div>
+            
+            <div v-else-if="userAPIKey" class="api-key-content">
+              <div class="api-key-display">
+                <label class="api-key-label">Your API Key:</label>
+                <div class="api-key-warning">
+                  ⚠️ <strong>Important:</strong> Regenerating this key will immediately invalidate the current key and break existing integrations.
+                </div>
+                <div class="api-key-wrapper">
+                  <code class="api-key-code" :class="{ 'api-key-hidden': hideAPIKey }">
+                    {{ hideAPIKey ? '•'.repeat(32) : userAPIKey }}
+                  </code>
+                  <div class="api-key-actions">
+                    <button @click="toggleAPIKeyVisibility" class="toggle-visibility-btn" :title="hideAPIKey ? 'Show API Key' : 'Hide API Key'">
+                      {{ hideAPIKey ? '👁️' : '🙈' }}
+                    </button>
+                    <button @click="copyAPIKey" class="copy-api-key-btn" title="Copy API Key">📋</button>
+                    <button @click="regenerateAPIKey" class="regenerate-btn" title="Generate New Key" :disabled="regenerating">
+                      {{ regenerating ? '⏳' : '🔄' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="api-key-usage">
+                <div class="usage-title">💡 Usage Examples:</div>
+                <div class="usage-examples">
+                  <div class="usage-example">
+                    <div class="usage-example-title">📨 Send Message:</div>
+                    <pre class="usage-code">curl -X POST "{{ baseURL }}/api/messages/send" \
+  -H "X-API-Key: {{ userAPIKey }}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "chat_jid": "1234567890@s.whatsapp.net",
+    "message": "Hello from API!"
+  }'</pre>
+                    <button @click="copyUsageCode('send')" class="copy-usage-btn">📋 Copy</button>
+                  </div>
+                  
+                  <div class="usage-example">
+                    <div class="usage-example-title">🔗 List Webhooks:</div>
+                    <pre class="usage-code">curl -X GET "{{ baseURL }}/api/webhooks" \
+  -H "X-API-Key: {{ userAPIKey }}"</pre>
+                    <button @click="copyUsageCode('list')" class="copy-usage-btn">📋 Copy</button>
+                  </div>
+                </div>
+                
+                <div class="n8n-config">
+                  <div class="usage-title">🔧 n8n HTTP Node Configuration:</div>
+                  <div class="config-box">
+                    <div class="config-item">
+                      <span class="config-label">Authentication Type:</span>
+                      <span class="config-value">Header Auth</span>
+                    </div>
+                    <div class="config-item">
+                      <span class="config-label">Header Name:</span>
+                      <span class="config-value">X-API-Key</span>
+                      <button @click="copyToClipboard('X-API-Key')" class="copy-small-btn">📋</button>
+                    </div>
+                    <div class="config-item">
+                      <span class="config-label">Header Value:</span>
+                      <span class="config-value">{{ userAPIKey }}</span>
+                      <button @click="copyAPIKey" class="copy-small-btn">📋</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div v-else-if="!apiKeyLoading" class="api-key-generate">
+              <p>No API key found. Generate one to start using the API.</p>
+              <button @click="generateAPIKey" class="generate-api-key-btn" :disabled="generating">
+                <span v-if="generating">⏳ Generating...</span>
+                <span v-else>🔑 Generate API Key</span>
+              </button>
+            </div>
+            
+            <div v-if="apiKeyError" class="error-message">
+              ❌ {{ apiKeyError }}
+            </div>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 </template>
@@ -305,6 +318,7 @@ export default {
       generating: false,
       // API Key Management
       userAPIKey: '',
+      showAdvancedSection: false,
       apiKeyLoading: false,
       apiKeyError: '',
       hideAPIKey: true,
@@ -1405,6 +1419,49 @@ main {
 }
 .copy-small-btn:hover {
   background: #2d3748;
+}
+
+/* Developer/Advanced Section Styles */
+.developer-section {
+  width: 100%;
+  max-width: 1400px;
+  margin: 2rem 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.developer-header {
+  background: #f8f9fa;
+  padding: 1.5rem;
+  cursor: pointer;
+  border-bottom: 1px solid #e0e0e0;
+  transition: background 0.3s;
+  user-select: none;
+}
+
+.developer-header:hover {
+  background: #e9ecef;
+}
+
+.developer-header h2 {
+  margin: 0 0 0.5rem 0;
+  color: #495057;
+  font-size: 1.3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.developer-description {
+  margin: 0;
+  color: #6c757d;
+  font-size: 0.95rem;
+}
+
+.developer-content {
+  padding: 2rem;
+  background: white;
 }
 
 .api-key-generate {
